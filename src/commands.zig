@@ -88,11 +88,10 @@ pub fn cmdLs(ctx: *Ctx, t: Target, content: []const u8) !void {
             const dotcolor = if (j.foreign) ctx.k(ctx_mod.YELLOW) else if (j.enabled) ctx.k(ctx_mod.GREEN) else ctx.k(ctx_mod.DIM);
             const dot = if (j.foreign) "?" else if (j.enabled) "\xe2\x97\x8f" else "\xe2\x97\x8b";
             ctx.emit("{s}{s}{s}{s}{s}{s}{s} {s}{s}{s} {s}\n", .{
-                idcolor, display.padTo(ctx.a, idcol, 14), ctx.k(ctx_mod.RESET),
-                ctx.k(ctx_mod.DIM), display.padTo(ctx.a, j.schedule, 22), ctx.k(ctx_mod.RESET),
-                display.padTo(ctx.a, nr, 24),
-                dotcolor, dot, ctx.k(ctx_mod.RESET),
-                display.truncEllipsis(ctx.a, j.command, cmd_w),
+                idcolor,                      display.padTo(ctx.a, idcol, 14),                ctx.k(ctx_mod.RESET),
+                ctx.k(ctx_mod.DIM),           display.padTo(ctx.a, j.schedule, 22),           ctx.k(ctx_mod.RESET),
+                display.padTo(ctx.a, nr, 24), dotcolor,                                       dot,
+                ctx.k(ctx_mod.RESET),         display.truncEllipsis(ctx.a, j.command, cmd_w),
             });
         },
         else => {},

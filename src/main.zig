@@ -13,11 +13,11 @@ const Cmd = enum { ls, add, rm, enable, disable, show, run, explain, import, bac
 
 fn parseCmd(s: []const u8) Cmd {
     const map = .{
-        .{ "ls", Cmd.ls },         .{ "list", Cmd.ls },         .{ "add", Cmd.add },     .{ "set", Cmd.add },
-        .{ "rm", Cmd.rm },         .{ "remove", Cmd.rm },       .{ "delete", Cmd.rm },
-        .{ "enable", Cmd.enable }, .{ "disable", Cmd.disable }, .{ "show", Cmd.show },
-        .{ "run", Cmd.run },       .{ "explain", Cmd.explain }, .{ "import", Cmd.import },
-        .{ "backup", Cmd.backup }, .{ "restore", Cmd.restore }, .{ "version", Cmd.version }, .{ "help", Cmd.help },
+        .{ "ls", Cmd.ls },           .{ "list", Cmd.ls },       .{ "add", Cmd.add },         .{ "set", Cmd.add },
+        .{ "rm", Cmd.rm },           .{ "remove", Cmd.rm },     .{ "delete", Cmd.rm },       .{ "enable", Cmd.enable },
+        .{ "disable", Cmd.disable }, .{ "show", Cmd.show },     .{ "run", Cmd.run },         .{ "explain", Cmd.explain },
+        .{ "import", Cmd.import },   .{ "backup", Cmd.backup }, .{ "restore", Cmd.restore }, .{ "version", Cmd.version },
+        .{ "help", Cmd.help },
     };
     inline for (map) |e| if (std.mem.eql(u8, s, e[0])) return e[1];
     return .unknown;
@@ -43,35 +43,70 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var i: usize = 1;
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
+        // `--` ends option parsing; remaining argv becomes positional.
         if (std.mem.eql(u8, arg, "--")) {
             i += 1;
             while (i < argv.len) : (i += 1) try positionals.append(a, argv[i]);
             break;
-        } else if (std.mem.eql(u8, arg, "-H") or std.mem.eql(u8, arg, "--host")) {
+        }
+        // Options that take a value.
+        if (std.mem.eql(u8, arg, "-H") or std.mem.eql(u8, arg, "--host")) {
             i += 1;
             if (i < argv.len) try hosts.append(a, argv[i]);
-        } else if (std.mem.eql(u8, arg, "--all")) use_all = true
-        else if (std.mem.eql(u8, arg, "-u") or std.mem.eql(u8, arg, "--user")) {
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "-u") or std.mem.eql(u8, arg, "--user")) {
             i += 1;
             if (i < argv.len) user = argv[i];
-        } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--file")) {
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--file")) {
             i += 1;
             if (i < argv.len) file_path = argv[i];
-        } else if (std.mem.eql(u8, arg, "--id")) {
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--id")) {
             i += 1;
             if (i < argv.len) want_id = argv[i];
-        } else if (std.mem.eql(u8, arg, "--dry-run")) ctx.dry_run = true
-        else if (std.mem.eql(u8, arg, "-y") or std.mem.eql(u8, arg, "--yes")) ctx.yes = true
-        else if (std.mem.eql(u8, arg, "--json")) ctx.json = true
-        else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) ctx.quiet = true
-        else if (std.mem.eql(u8, arg, "--no-color")) ctx.color = false
-        else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) force_help = true
-        else if (arg.len > 1 and arg[0] == '-' and !std.ascii.isDigit(arg[1])) {
+            continue;
+        }
+        // Boolean flags.
+        if (std.mem.eql(u8, arg, "--all")) {
+            use_all = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--dry-run")) {
+            ctx.dry_run = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "-y") or std.mem.eql(u8, arg, "--yes")) {
+            ctx.yes = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--json")) {
+            ctx.json = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
+            ctx.quiet = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--no-color")) {
+            ctx.color = false;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            force_help = true;
+            continue;
+        }
+        // Unknown option (starts with `-`, not a negative number).
+        if (arg.len > 1 and arg[0] == '-' and !std.ascii.isDigit(arg[1])) {
             posix.eprint("looper: unknown option '{s}' (try: looper help)\n", .{arg});
             ctx.fail(2);
             ctx.flush();
             std.process.exit(ctx.exit_code);
-        } else try positionals.append(a, arg);
+        }
+        try positionals.append(a, arg);
     }
 
     if (force_help or positionals.items.len == 0) {

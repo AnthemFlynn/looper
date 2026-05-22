@@ -20,8 +20,7 @@ pub fn printDiff(ctx: *ctx_mod.Ctx, old: []const u8, new: []const u8) void {
         var j: usize = n;
         while (j > 0) : (j -= 1) {
             const idx = (i - 1) * (n + 1) + (j - 1);
-            if (std.mem.eql(u8, ol.items[i - 1], nl.items[j - 1])) dp[idx] = dp[i * (n + 1) + j] + 1
-            else dp[idx] = @max(dp[i * (n + 1) + (j - 1)], dp[(i - 1) * (n + 1) + j]);
+            if (std.mem.eql(u8, ol.items[i - 1], nl.items[j - 1])) dp[idx] = dp[i * (n + 1) + j] + 1 else dp[idx] = @max(dp[i * (n + 1) + (j - 1)], dp[(i - 1) * (n + 1) + j]);
         }
     }
     var x: usize = 0;

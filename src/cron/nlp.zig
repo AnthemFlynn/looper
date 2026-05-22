@@ -26,12 +26,12 @@ fn normSpace(a: std.mem.Allocator, s: []const u8) []const u8 {
 fn dayNameLookup(w: []const u8) ?u32 {
     const T = struct { n: []const u8, v: u32 };
     const days = [_]T{
-        .{ .n = "sunday", .v = 0 },    .{ .n = "monday", .v = 1 }, .{ .n = "tuesday", .v = 2 },
+        .{ .n = "sunday", .v = 0 },    .{ .n = "monday", .v = 1 },   .{ .n = "tuesday", .v = 2 },
         .{ .n = "wednesday", .v = 3 }, .{ .n = "thursday", .v = 4 }, .{ .n = "friday", .v = 5 },
-        .{ .n = "saturday", .v = 6 },  .{ .n = "sun", .v = 0 },     .{ .n = "mon", .v = 1 },
-        .{ .n = "tue", .v = 2 },       .{ .n = "tues", .v = 2 },    .{ .n = "wed", .v = 3 },
-        .{ .n = "weds", .v = 3 },      .{ .n = "thu", .v = 4 },     .{ .n = "thur", .v = 4 },
-        .{ .n = "thurs", .v = 4 },     .{ .n = "fri", .v = 5 },     .{ .n = "sat", .v = 6 },
+        .{ .n = "saturday", .v = 6 },  .{ .n = "sun", .v = 0 },      .{ .n = "mon", .v = 1 },
+        .{ .n = "tue", .v = 2 },       .{ .n = "tues", .v = 2 },     .{ .n = "wed", .v = 3 },
+        .{ .n = "weds", .v = 3 },      .{ .n = "thu", .v = 4 },      .{ .n = "thur", .v = 4 },
+        .{ .n = "thurs", .v = 4 },     .{ .n = "fri", .v = 5 },      .{ .n = "sat", .v = 6 },
     };
     for (days) |d| if (std.mem.eql(u8, w, d.n)) return d.v;
     return null;
@@ -150,8 +150,7 @@ pub fn nlpToCron(a: std.mem.Allocator, raw: []const u8) ?[]const u8 {
             } else if (isNumber(nx) and i + 2 < ws.len) {
                 const n = std.fmt.parseInt(u32, nx, 10) catch 0;
                 const unit = ws[i + 2];
-                if (n > 0 and std.mem.startsWith(u8, unit, "min")) every_min = n
-                else if (n > 0 and (std.mem.startsWith(u8, unit, "hour") or std.mem.eql(u8, unit, "hr") or std.mem.eql(u8, unit, "hrs"))) every_hr = n;
+                if (n > 0 and std.mem.startsWith(u8, unit, "min")) every_min = n else if (n > 0 and (std.mem.startsWith(u8, unit, "hour") or std.mem.eql(u8, unit, "hr") or std.mem.eql(u8, unit, "hrs"))) every_hr = n;
             }
         }
         if (std.mem.startsWith(u8, w, "weekday") or std.mem.eql(u8, w, "weekdays")) {
@@ -198,11 +197,10 @@ pub fn nlpToCron(a: std.mem.Allocator, raw: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, w, "from")) {
             if (parseClock(ws, i + 1)) |c1| {
                 hr_lo = c1.h;
-                var j = i + 1 + c1.used;
+                const j = i + 1 + c1.used;
                 if (j < ws.len and (std.mem.eql(u8, ws[j], "to") or std.mem.eql(u8, ws[j], "until") or std.mem.eql(u8, ws[j], "till"))) {
                     if (parseClock(ws, j + 1)) |c2| hr_hi = c2.h;
                 }
-                _ = &j;
             }
         }
         if (std.mem.eql(u8, w, "at")) {

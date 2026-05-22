@@ -30,6 +30,11 @@ pub fn nextRun(s: Schedule, from: i64) ?i64 {
     if (s.reboot) return null;
     var ts: i64 = from - @mod(from, 60) + 60;
     var guard: usize = 0;
+    // Safety bound on the search loop. The loop normally advances by
+    // month → day → hour → minute, so even sparse schedules
+    // (e.g. "0 0 29 2 *" — Feb 29 only) converge in a few thousand
+    // iterations. We allow ~6 years' worth of single-minute steps as a
+    // ceiling so a pathologically broken Schedule cannot wedge.
     const max_iter: usize = 366 * 24 * 60 * 6;
     while (guard < max_iter) : (guard += 1) {
         var tm = epochToTm(ts);

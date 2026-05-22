@@ -97,12 +97,7 @@ pub fn parseSchedule(expr_in: []const u8) ParseError!Schedule {
         const m = expr[1..];
         if (std.ascii.eqlIgnoreCase(m, "reboot")) return .{ .reboot = true };
         const mapped: ?[]const u8 =
-            if (std.ascii.eqlIgnoreCase(m, "yearly") or std.ascii.eqlIgnoreCase(m, "annually")) "0 0 1 1 *"
-            else if (std.ascii.eqlIgnoreCase(m, "monthly")) "0 0 1 * *"
-            else if (std.ascii.eqlIgnoreCase(m, "weekly")) "0 0 * * 0"
-            else if (std.ascii.eqlIgnoreCase(m, "daily") or std.ascii.eqlIgnoreCase(m, "midnight")) "0 0 * * *"
-            else if (std.ascii.eqlIgnoreCase(m, "hourly")) "0 * * * *"
-            else null;
+            if (std.ascii.eqlIgnoreCase(m, "yearly") or std.ascii.eqlIgnoreCase(m, "annually")) "0 0 1 1 *" else if (std.ascii.eqlIgnoreCase(m, "monthly")) "0 0 1 * *" else if (std.ascii.eqlIgnoreCase(m, "weekly")) "0 0 * * 0" else if (std.ascii.eqlIgnoreCase(m, "daily") or std.ascii.eqlIgnoreCase(m, "midnight")) "0 0 * * *" else if (std.ascii.eqlIgnoreCase(m, "hourly")) "0 * * * *" else null;
         if (mapped) |mm| return parseSchedule(mm);
         return ParseError.BadMacro;
     }
@@ -203,10 +198,9 @@ test "parseSchedule star sets dom_star and dow_star" {
 }
 
 test "matchesDay Vixie OR-rule: both constrained fires on either" {
-    var s = try parseSchedule("0 0 13 * 5"); // 13th OR Friday
-    _ = &s;
+    const s = try parseSchedule("0 0 13 * 5"); // 13th OR Friday
     try testing.expect(s.matchesDay(13, 2)); // 13th, Tue → match (DOM)
-    try testing.expect(s.matchesDay(7, 5));  // 7th, Fri → match (DOW)
+    try testing.expect(s.matchesDay(7, 5)); // 7th, Fri → match (DOW)
     try testing.expect(!s.matchesDay(7, 2)); // 7th, Tue → no match
 }
 

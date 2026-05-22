@@ -120,7 +120,7 @@ test "runCapture stdin payload larger than PIPE_BUF round-trips intact" {
     const size = 256 * 1024;
     const payload = try a.alloc(u8, size);
     for (payload, 0..) |*ch, i| ch.* = 'A' + @as(u8, @intCast(i % 26));
-    const r = try runCapture(a, &[_][]const u8{ "/bin/cat" }, payload);
+    const r = try runCapture(a, &[_][]const u8{"/bin/cat"}, payload);
     try testing.expectEqual(@as(i32, 0), r.code);
     try testing.expectEqual(size, r.out.len);
     try testing.expectEqualSlices(u8, payload, r.out);
@@ -136,6 +136,6 @@ test "runCapture exit code surfaces" {
 test "runCapture nonexistent binary returns 127" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const r = try runCapture(arena.allocator(), &[_][]const u8{ "/this/does/not/exist" }, null);
+    const r = try runCapture(arena.allocator(), &[_][]const u8{"/this/does/not/exist"}, null);
     try testing.expectEqual(@as(i32, 127), r.code);
 }

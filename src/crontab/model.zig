@@ -160,8 +160,7 @@ pub fn serialize(a: std.mem.Allocator, ct: *Crontab) ![]u8 {
                 ctx_mod.aw(a, &out, "{s} {s}\n", .{ j.schedule, j.command });
             } else {
                 ctx_mod.aw(a, &out, "{s} id={s} enabled={d}\n", .{ MARKER, j.id, @as(u8, if (j.enabled) 1 else 0) });
-                if (j.enabled) ctx_mod.aw(a, &out, "{s} {s}\n", .{ j.schedule, j.command })
-                else ctx_mod.aw(a, &out, "# {s} {s}\n", .{ j.schedule, j.command });
+                if (j.enabled) ctx_mod.aw(a, &out, "{s} {s}\n", .{ j.schedule, j.command }) else ctx_mod.aw(a, &out, "# {s} {s}\n", .{ j.schedule, j.command });
             }
         },
     };

@@ -69,9 +69,7 @@ pub fn humanize(a: std.mem.Allocator, raw_in: []const u8) []const u8 {
         // "every N minutes" composes with an hour constraint (single
         // value, range, or step) so the hour scope is not silently lost.
         const minute_part = std.fmt.allocPrint(a, "every {s} minutes", .{m[2..]}) catch raw;
-        time_clause = if (std.mem.eql(u8, h, "*")) minute_part
-        else if (std.mem.indexOfScalar(u8, h, '-') != null) (std.fmt.allocPrint(a, "{s} between hours {s}", .{ minute_part, h }) catch minute_part)
-        else (std.fmt.allocPrint(a, "{s} at hour {s}", .{ minute_part, h }) catch minute_part);
+        time_clause = if (std.mem.eql(u8, h, "*")) minute_part else if (std.mem.indexOfScalar(u8, h, '-') != null) (std.fmt.allocPrint(a, "{s} between hours {s}", .{ minute_part, h }) catch minute_part) else (std.fmt.allocPrint(a, "{s} at hour {s}", .{ minute_part, h }) catch minute_part);
     } else if (std.mem.eql(u8, h, "*")) {
         time_clause = std.fmt.allocPrint(a, "every hour at minute {s}", .{m}) catch raw;
     } else if (std.mem.startsWith(u8, h, "*/")) {
@@ -79,15 +77,12 @@ pub fn humanize(a: std.mem.Allocator, raw_in: []const u8) []const u8 {
     } else {
         const mi = std.fmt.parseInt(u32, m, 10) catch null;
         const hi = std.fmt.parseInt(u32, h, 10) catch null;
-        time_clause = if (mi != null and hi != null) (std.fmt.allocPrint(a, "at {d:0>2}:{d:0>2}", .{ hi.?, mi.? }) catch raw)
-            else (std.fmt.allocPrint(a, "at minute {s} of hour {s}", .{ m, h }) catch raw);
+        time_clause = if (mi != null and hi != null) (std.fmt.allocPrint(a, "at {d:0>2}:{d:0>2}", .{ hi.?, mi.? }) catch raw) else (std.fmt.allocPrint(a, "at minute {s} of hour {s}", .{ m, h }) catch raw);
     }
     const dom_star = std.mem.eql(u8, dom, "*");
     const dow_star = std.mem.eql(u8, dow, "*");
     var day_clause: []const u8 = "";
-    if (!dow_star and dom_star) day_clause = std.fmt.allocPrint(a, " on {s}", .{titleField(a, 4, dow)}) catch ""
-    else if (dow_star and !dom_star) day_clause = std.fmt.allocPrint(a, " on day {s} of the month", .{dom}) catch ""
-    else if (!dow_star and !dom_star) day_clause = std.fmt.allocPrint(a, " on {s} or day {s}", .{ titleField(a, 4, dow), dom }) catch "";
+    if (!dow_star and dom_star) day_clause = std.fmt.allocPrint(a, " on {s}", .{titleField(a, 4, dow)}) catch "" else if (dow_star and !dom_star) day_clause = std.fmt.allocPrint(a, " on day {s} of the month", .{dom}) catch "" else if (!dow_star and !dom_star) day_clause = std.fmt.allocPrint(a, " on {s} or day {s}", .{ titleField(a, 4, dow), dom }) catch "";
     var mon_clause: []const u8 = "";
     if (!std.mem.eql(u8, mon, "*")) mon_clause = std.fmt.allocPrint(a, " in {s}", .{titleField(a, 3, mon)}) catch "";
     if (day_clause.len == 0 and mon_clause.len == 0 and !std.mem.eql(u8, time_clause, "every minute")) day_clause = " every day";
@@ -102,9 +97,7 @@ pub fn relTime(a: std.mem.Allocator, delta_in: i64) []const u8 {
     const mins = @divTrunc(d, 60);
     const hours = @divTrunc(mins, 60);
     const days = @divTrunc(hours, 24);
-    const core = if (days > 0) (std.fmt.allocPrint(a, "{d}d {d}h", .{ days, @mod(hours, 24) }) catch "")
-        else if (hours > 0) (std.fmt.allocPrint(a, "{d}h {d}m", .{ hours, @mod(mins, 60) }) catch "")
-        else (std.fmt.allocPrint(a, "{d}m", .{mins}) catch "");
+    const core = if (days > 0) (std.fmt.allocPrint(a, "{d}d {d}h", .{ days, @mod(hours, 24) }) catch "") else if (hours > 0) (std.fmt.allocPrint(a, "{d}h {d}m", .{ hours, @mod(mins, 60) }) catch "") else (std.fmt.allocPrint(a, "{d}m", .{mins}) catch "");
     return std.fmt.allocPrint(a, "{s} {s}", .{ if (past) "" else "in", core }) catch core;
 }
 
