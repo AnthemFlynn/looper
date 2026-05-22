@@ -28,7 +28,13 @@ pub const Ctx = struct {
     }
     pub fn flush(self: *Ctx) void {
         if (self.buf.items.len == 0) return;
-        _ = c.write(1, self.buf.items.ptr, self.buf.items.len);
+        // Best-effort: a single `write(2)` to stdout can return a short
+        // count (multi-target output easily exceeds PIPE_BUF). Loop via
+        // `posix.writeAll`; swallow errors here — a closed-pipe stdout
+        // is recoverable only insofar as the user already saw the early
+        // bytes, and propagating up would force every emit site to
+        // handle an error case that has no useful response.
+        posix.writeAll(1, self.buf.items) catch {};
         self.buf.clearRetainingCapacity();
     }
     pub fn k(self: *Ctx, code: []const u8) []const u8 {

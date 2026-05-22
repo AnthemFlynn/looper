@@ -74,7 +74,13 @@ pub fn writeFileAll(a: std.mem.Allocator, path: []const u8, data: []const u8) !v
     if (fd < 0) return BackendError.WriteFailed;
     defer _ = c.close(fd);
     if (data.len > 0) {
-        if (c.write(fd, data.ptr, data.len) < 0) return BackendError.WriteFailed;
+        // Loop until the full payload lands. A single `write(2)` may
+        // return a short count (PIPE_BUF on Linux is 4 KB, much smaller
+        // than a fleet-sized crontab); a bare call would silently
+        // truncate. `posix.writeAll` retries until done or a real
+        // error, in which case we surface `BackendError.WriteFailed`
+        // rather than handing the caller a partially-written file.
+        posix.writeAll(fd, data) catch return BackendError.WriteFailed;
     }
 }
 
@@ -116,7 +122,19 @@ pub fn writeCrontab(a: std.mem.Allocator, t: Target, data: []const u8) !void {
             const tmpl = try a.dupeZ(u8, "/tmp/looper.XXXXXX");
             const fd = c.mkstemp(tmpl.ptr);
             if (fd < 0) return BackendError.WriteFailed;
-            if (data.len > 0) _ = c.write(fd, data.ptr, data.len);
+            if (data.len > 0) {
+                // Previously this dropped the write(2) return value
+                // entirely (`_ = c.write(...)`), so a partial or failed
+                // write became a silent corruption — `crontab <tmpfile>`
+                // would happily install a truncated payload. Loop until
+                // done or surface the failure via WriteFailed before we
+                // hand the file to crontab.
+                posix.writeAll(fd, data) catch {
+                    _ = c.close(fd);
+                    _ = c.unlink(tmpl.ptr);
+                    return BackendError.WriteFailed;
+                };
+            }
             _ = c.close(fd);
             const path = std.mem.span(tmpl.ptr);
             var argv: std.ArrayList([]const u8) = .empty;
@@ -222,6 +240,26 @@ pub fn splitProbeResult(a: std.mem.Allocator, stdout: []const u8) !ReadResult {
 }
 
 const testing = std.testing;
+
+test "writeFileAll round-trips a payload larger than PIPE_BUF" {
+    // PIPE_BUF on Linux is 4 KB; macOS is 512 B. A bare single-shot
+    // `write(2)` would silently truncate the payload above that. 256 KB
+    // is comfortably past every PIPE_BUF and also past common 64 KB
+    // kernel buffer sizes — anything that survives this also survives
+    // a real fleet-sized crontab.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const size = 256 * 1024;
+    const payload = try a.alloc(u8, size);
+    for (payload, 0..) |*ch, i| ch.* = @intCast('A' + (i % 26));
+    const path = try std.fmt.allocPrint(a, "/tmp/looper-writeall-test-{x}", .{posix.nowEpoch()});
+    defer _ = posix.c.unlink((a.dupeZ(u8, path) catch unreachable).ptr);
+    try writeFileAll(a, path, payload);
+    const got = try readFileAll(a, path);
+    try testing.expectEqual(size, got.len);
+    try testing.expectEqualSlices(u8, payload, got);
+}
 
 test "sshArgvPrefix produces canonical batch-safe argv" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);

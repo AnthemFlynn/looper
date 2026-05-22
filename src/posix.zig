@@ -130,7 +130,12 @@ pub fn runInherit(a: std.mem.Allocator, argv: []const []const u8) !i32 {
 pub fn eprint(comptime fmt: []const u8, args: anytype) void {
     var b: [2048]u8 = undefined;
     const s = std.fmt.bufPrint(&b, fmt, args) catch return;
-    _ = c.write(2, s.ptr, s.len);
+    // 2 KB is well under PIPE_BUF on every platform, so a single
+    // write(2) practically never returns short here — but routing
+    // through writeAll keeps the "every write loops" invariant
+    // explicit and means a future caller widening the buffer doesn't
+    // silently re-introduce partial writes.
+    writeAll(2, s) catch {};
 }
 
 const testing = std.testing;
