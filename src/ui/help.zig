@@ -16,6 +16,7 @@ pub fn printHelp(ctx: *ctx_mod.Ctx) void {
     ctx.emit("{s}COMMANDS{s}\n", .{ B, R });
     ctx.emit("  ls                        List jobs with their next run times\n", .{});
     ctx.emit("  add <schedule> <command>  Add or update a job (idempotent; name with --id)\n", .{});
+    ctx.emit("  edit <id>                 Partially update a job: --schedule X and/or --command Y\n", .{});
     ctx.emit("  rm <id|fN>...             Remove job(s): by id, or unmanaged ones by fN handle\n", .{});
     ctx.emit("  enable <id>...            Re-enable a disabled job\n", .{});
     ctx.emit("  disable <id>...           Pause a job, keeping its definition\n", .{});
@@ -51,6 +52,7 @@ pub fn printHelp(ctx: *ctx_mod.Ctx) void {
     ctx.emit("{s}EXAMPLES{s}\n", .{ B, R });
     ctx.emit("  {s}  {s}# nightly at 3am{s}\n", .{ "looper add \"0 3 * * *\" backup.sh              ", D, R });
     ctx.emit("  {s}  {s}# plain English{s}\n", .{ "looper add \"every weekday at 8am\" report.sh   ", D, R });
+    ctx.emit("  {s}  {s}# change schedule only{s}\n", .{ "looper edit backup --schedule \"0 4 * * *\"     ", D, R });
     ctx.emit("  {s}  {s}# preview, no changes{s}\n", .{ "looper explain \"at noon on weekends\"          ", D, R });
     ctx.emit("  {s}  {s}# remove an unmanaged job (see ls){s}\n", .{ "looper rm f1                                  ", D, R });
     ctx.emit("  {s}  {s}# every host in the fleet{s}\n", .{ "looper --all ls                               ", D, R });

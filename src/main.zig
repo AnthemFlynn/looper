@@ -12,15 +12,20 @@ const colors = @import("ui/colors.zig");
 const target_mod = @import("crontab/target.zig");
 const tz_mod = @import("tz.zig");
 
-const Cmd = enum { ls, add, rm, enable, disable, show, run, explain, import, backup, restore, doctor, version, help, unknown };
+const Cmd = enum { ls, add, edit, rm, enable, disable, show, run, explain, import, backup, restore, doctor, version, help, unknown };
 
 fn parseCmd(s: []const u8) Cmd {
+    // Note: `set` aliases `edit` (the partial-update command), not `add`.
+    // Previously `set` was an undocumented alias for `add`; redirecting
+    // it to `edit` makes the natural reading "set the schedule of X to
+    // Y" do the smarter thing — no positional re-statement of the other
+    // field, so the command users don't want to change can't drift.
     const map = .{
-        .{ "ls", Cmd.ls },           .{ "list", Cmd.ls },         .{ "add", Cmd.add },         .{ "set", Cmd.add },
-        .{ "rm", Cmd.rm },           .{ "remove", Cmd.rm },       .{ "delete", Cmd.rm },       .{ "enable", Cmd.enable },
-        .{ "disable", Cmd.disable }, .{ "show", Cmd.show },       .{ "run", Cmd.run },         .{ "explain", Cmd.explain },
-        .{ "import", Cmd.import },   .{ "backup", Cmd.backup },   .{ "restore", Cmd.restore }, .{ "doctor", Cmd.doctor },
-        .{ "version", Cmd.version }, .{ "help", Cmd.help },
+        .{ "ls", Cmd.ls },           .{ "list", Cmd.ls },         .{ "add", Cmd.add },         .{ "edit", Cmd.edit },
+        .{ "set", Cmd.edit },        .{ "rm", Cmd.rm },           .{ "remove", Cmd.rm },       .{ "delete", Cmd.rm },
+        .{ "enable", Cmd.enable },   .{ "disable", Cmd.disable }, .{ "show", Cmd.show },       .{ "run", Cmd.run },
+        .{ "explain", Cmd.explain }, .{ "import", Cmd.import },   .{ "backup", Cmd.backup },   .{ "restore", Cmd.restore },
+        .{ "doctor", Cmd.doctor },   .{ "version", Cmd.version }, .{ "help", Cmd.help },
     };
     inline for (map) |e| if (std.mem.eql(u8, s, e[0])) return e[1];
     return .unknown;
@@ -142,6 +147,20 @@ pub fn main(init: std.process.Init.Minimal) !void {
                     break;
                 }
                 try cmds.cmdAdd(&ctx, t, content, rest[0], rest[1], parsed.want_id);
+            },
+            .edit => {
+                if (rest.len < 1) {
+                    posix.eprint("looper: edit needs an id (try: looper ls)\n", .{});
+                    ctx.fail(2);
+                    break;
+                }
+                if (parsed.new_schedule == null and parsed.new_command == null) {
+                    posix.eprint("looper: edit needs --schedule and/or --command\n", .{});
+                    posix.eprint("  example: looper edit {s} --schedule \"0 4 * * *\"\n", .{rest[0]});
+                    ctx.fail(2);
+                    break;
+                }
+                try cmds.cmdEdit(&ctx, t, content, rest[0], parsed.new_schedule, parsed.new_command);
             },
             .rm => {
                 if (rest.len < 1) {

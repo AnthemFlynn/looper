@@ -18,6 +18,12 @@ pub const ParsedArgs = struct {
     user: []const u8,
     file_path: []const u8,
     want_id: ?[]const u8,
+    /// `edit` partial-update flags. Either, both, or neither may be
+    /// supplied; `edit` requires at least one, other commands ignore
+    /// them. Stored on ParsedArgs (not Ctx) because they're command
+    /// arguments, not global UI toggles.
+    new_schedule: ?[]const u8,
+    new_command: ?[]const u8,
     force_help: bool,
     /// Set to the offending arg when an unknown option (e.g. `--frob`)
     /// is encountered. Parsing stops at the first unknown option so
@@ -40,6 +46,8 @@ pub fn parseArgv(a: std.mem.Allocator, argv: []const []const u8, ctx: *ctx_mod.C
         .user = "",
         .file_path = "",
         .want_id = null,
+        .new_schedule = null,
+        .new_command = null,
         .force_help = false,
         .bad_option = null,
     };
@@ -72,6 +80,16 @@ pub fn parseArgv(a: std.mem.Allocator, argv: []const []const u8, ctx: *ctx_mod.C
         if (std.mem.eql(u8, arg, "--id")) {
             i += 1;
             if (i < argv.len) p.want_id = argv[i];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--schedule")) {
+            i += 1;
+            if (i < argv.len) p.new_schedule = argv[i];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--command")) {
+            i += 1;
+            if (i < argv.len) p.new_command = argv[i];
             continue;
         }
         // Boolean flags.
@@ -229,6 +247,36 @@ test "parseArgv --id and --user" {
     try testing.expectEqualStrings("backup", p.want_id.?);
 }
 
+test "parseArgv --schedule and --command captured independently" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = newCtx(arena.allocator());
+    const argv = [_][]const u8{ "looper", "edit", "db-backup", "--schedule", "0 4 * * *" };
+    const p = try parseArgv(arena.allocator(), &argv, &ctx);
+    try testing.expectEqualStrings("0 4 * * *", p.new_schedule.?);
+    try testing.expect(p.new_command == null);
+}
+
+test "parseArgv --command alone" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = newCtx(arena.allocator());
+    const argv = [_][]const u8{ "looper", "edit", "db-backup", "--command", "/bin/new.sh" };
+    const p = try parseArgv(arena.allocator(), &argv, &ctx);
+    try testing.expectEqualStrings("/bin/new.sh", p.new_command.?);
+    try testing.expect(p.new_schedule == null);
+}
+
+test "parseArgv both --schedule and --command" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = newCtx(arena.allocator());
+    const argv = [_][]const u8{ "looper", "edit", "db-backup", "--schedule", "@daily", "--command", "/bin/new.sh" };
+    const p = try parseArgv(arena.allocator(), &argv, &ctx);
+    try testing.expectEqualStrings("@daily", p.new_schedule.?);
+    try testing.expectEqualStrings("/bin/new.sh", p.new_command.?);
+}
+
 test "parseArgv -- ends option parsing" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -285,6 +333,8 @@ test "buildTargets default = local" {
         .user = "",
         .file_path = "",
         .want_id = null,
+        .new_schedule = null,
+        .new_command = null,
         .force_help = false,
         .bad_option = null,
     };
@@ -303,6 +353,8 @@ test "buildTargets file path → one file target" {
         .user = "",
         .file_path = "/tmp/c",
         .want_id = null,
+        .new_schedule = null,
+        .new_command = null,
         .force_help = false,
         .bad_option = null,
     };
@@ -323,6 +375,8 @@ test "buildTargets -H hosts → one remote per host, sharing user" {
         .user = "ops",
         .file_path = "",
         .want_id = null,
+        .new_schedule = null,
+        .new_command = null,
         .force_help = false,
         .bad_option = null,
     };
@@ -343,6 +397,8 @@ test "buildTargets --all parses hosts file, ignores blank/comment lines" {
         .user = "",
         .file_path = "",
         .want_id = null,
+        .new_schedule = null,
+        .new_command = null,
         .force_help = false,
         .bad_option = null,
     };
@@ -371,6 +427,8 @@ test "buildTargets --all empty hosts file → empty list" {
         .user = "",
         .file_path = "",
         .want_id = null,
+        .new_schedule = null,
+        .new_command = null,
         .force_help = false,
         .bad_option = null,
     };
@@ -388,6 +446,8 @@ test "buildTargets --all + -u applies user to every remote" {
         .user = "deploy",
         .file_path = "",
         .want_id = null,
+        .new_schedule = null,
+        .new_command = null,
         .force_help = false,
         .bad_option = null,
     };

@@ -29,7 +29,7 @@ src/
   posix.zig               Single @cImport for libc; runCapture / runInherit / writeAll / getenv / nowEpoch
   tz.zig                  Pure TzInfo {offset_secs, abbrev, source}; controllerTz, parseDateProbe
   tz_probe.zig            Remote-side ssh TZ probe + per-run Cache; pairs with tz.zig
-  commands.zig            applyMutation + cmdLs/Add/Rm/Toggle/Show/Run/Explain/Backup/Restore/Import/Doctor
+  commands.zig            applyMutation + cmdLs/Add/Edit/Rm/Toggle/Show/Run/Explain/Backup/Restore/Import/Doctor
   cron/
     schedule.zig          Schedule bitset + parseSchedule + fieldBounds + parseField + nameToNum
     next_run.zig          nextRun (controller-zone, DST-correct) + nextRunInTz (fixed-offset target zone)
@@ -57,7 +57,8 @@ Inline `test "..." { ... }` blocks colocated at the bottom of each module. `zig 
 - **Never emit non-standard cron.** `parseSchedule` validates before any write. If `nlpToCron` returns null for an English phrase, surface the failure — do not invent syntax.
 - **Every mutation is preceded by a backup.** `applyMutation` in `commands.zig` is the single funnel; new commands that change the crontab must route through it.
 - **Managed jobs are identified solely by the `#looper#` marker line.** Lines without that marker are "foreign" and must be preserved untouched on serialize. `import` is the only path that adopts them.
-- **Idempotency by `id`.** `add` with an existing id updates in place; never appends a duplicate.
+- **Idempotency by `id`.** `add` with an existing id updates in place (full re-statement of schedule + command); never appends a duplicate. For changing only one field — schedule OR command — use `edit <id> --schedule X` / `--command Y` so the unchanged field can't drift.
+- **`set` aliases `edit`, not `add`.** Historical: `set` was an undocumented alias for `add`. Reassigned because the natural reading of "set the schedule of X" is the partial-update semantics, which is also less error-prone (no re-statement of the other field).
 - **No "remove all" command exists, by design.** `crontab -r` is the footgun this tool exists to avoid.
 - **Disabled jobs keep their definition.** `disable` comments the payload line but leaves the marker (`enabled=0`); do not delete on disable.
 - **Color is opt-in to a tty and `NO_COLOR`.** Use `ctx.k(CODE)` rather than hardcoding escape sequences so `--no-color` / `NO_COLOR` keep working.

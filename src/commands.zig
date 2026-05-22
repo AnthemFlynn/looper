@@ -169,6 +169,40 @@ pub fn cmdToggle(ctx: *Ctx, t: Target, content: []const u8, ids: [][]const u8, e
     try applyMutation(ctx, t, content, new_content, verb);
 }
 
+pub fn cmdEdit(ctx: *Ctx, t: Target, content: []const u8, id: []const u8, new_schedule: ?[]const u8, new_command: ?[]const u8) !void {
+    var ct = try model.parseCrontab(ctx.a, content);
+    const idx = ct.findIndex(id) orelse {
+        posix.eprint("looper: no managed job '{s}' on {s}\n", .{ id, t.label(ctx.a) });
+        posix.eprint("  (foreign jobs must be adopted with 'looper import' before editing)\n", .{});
+        ctx.fail(1);
+        return;
+    };
+    if (new_schedule) |raw| {
+        // Same NLP + validation chain as cmdAdd: surface the same errors
+        // and the same "interpreted as" disclosure so `edit` behaves
+        // identically to `add` for the schedule-update path.
+        const cron = nlp.toCron(ctx.a, raw) orelse {
+            posix.eprint("looper: couldn't read schedule '{s}'\n", .{raw});
+            posix.eprint("  use cron (\"*/15 9-17 * * 1-5\") or plain English (\"every weekday at 9am\")\n", .{});
+            posix.eprint("  preview with: looper explain '{s}'\n", .{raw});
+            ctx.fail(1);
+            return;
+        };
+        _ = sched_mod.parseSchedule(cron) catch |e| {
+            posix.eprint("looper: invalid schedule '{s}': {s}\n", .{ cron, @errorName(e) });
+            ctx.fail(1);
+            return;
+        };
+        if (!std.mem.eql(u8, cron, raw))
+            ctx.emit("{s}interpreted{s} \"{s}\" as {s}{s}{s}  ({s})\n", .{ ctx.k(colors.DIM), ctx.k(colors.RESET), raw, ctx.k(colors.BOLD), cron, ctx.k(colors.RESET), humanize.humanize(ctx.a, cron) });
+        ct.items.items[idx].job.schedule = cron;
+    }
+    if (new_command) |cmd| ct.items.items[idx].job.command = cmd;
+    const new_content = try model.serialize(ctx.a, &ct);
+    const verb = try std.fmt.allocPrint(ctx.a, "edited '{s}'", .{id});
+    try applyMutation(ctx, t, content, new_content, verb);
+}
+
 pub fn cmdRm(ctx: *Ctx, t: Target, content: []const u8, ids: [][]const u8) !void {
     var ct = try model.parseCrontab(ctx.a, content);
     var rm: std.ArrayList(usize) = .empty;
@@ -663,6 +697,104 @@ test "cmdAdd is idempotent by id" {
     try testing.expectEqual(@as(usize, 1), marker_count);
     try testing.expect(std.mem.indexOf(u8, c2, "0 4 * * * /bin/echo second") != null);
     try testing.expect(std.mem.indexOf(u8, c2, "first") == null);
+}
+
+test "cmdEdit --schedule preserves command" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo original", "demo");
+    const after_add = try target_mod.readFileAll(a, tgt.path);
+    try cmdEdit(&ctx, tgt, after_add, "demo", "0 4 * * *", null);
+    const got = try target_mod.readFileAll(a, tgt.path);
+    try testing.expect(std.mem.indexOf(u8, got, "0 4 * * * /bin/echo original") != null);
+    try testing.expect(std.mem.indexOf(u8, got, "0 3 * * *") == null);
+}
+
+test "cmdEdit --command preserves schedule" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo original", "demo");
+    const after_add = try target_mod.readFileAll(a, tgt.path);
+    try cmdEdit(&ctx, tgt, after_add, "demo", null, "/bin/echo updated");
+    const got = try target_mod.readFileAll(a, tgt.path);
+    try testing.expect(std.mem.indexOf(u8, got, "0 3 * * * /bin/echo updated") != null);
+    try testing.expect(std.mem.indexOf(u8, got, "original") == null);
+}
+
+test "cmdEdit both flags update both fields" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo");
+    const after_add = try target_mod.readFileAll(a, tgt.path);
+    try cmdEdit(&ctx, tgt, after_add, "demo", "@hourly", "/bin/echo b");
+    const got = try target_mod.readFileAll(a, tgt.path);
+    try testing.expect(std.mem.indexOf(u8, got, "@hourly /bin/echo b") != null);
+}
+
+test "cmdEdit rejects unknown id with exit 1" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    try cmdEdit(&ctx, tgt, "", "no-such-job", "@daily", null);
+    try testing.expectEqual(@as(u8, 1), ctx.exit_code);
+}
+
+test "cmdEdit rejects foreign job (no marker) with exit 1" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    // Foreign job — no `#looper#` marker, so findIndex returns null
+    // even though it's a real cron line.
+    const foreign = "0 5 * * * /opt/legacy/job.sh\n";
+    try cmdEdit(&ctx, tgt, foreign, "legacy", "@daily", null);
+    try testing.expectEqual(@as(u8, 1), ctx.exit_code);
+}
+
+test "cmdEdit rejects invalid schedule" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo");
+    const after_add = try target_mod.readFileAll(a, tgt.path);
+    try cmdEdit(&ctx, tgt, after_add, "demo", "not a real schedule and not English either", null);
+    try testing.expectEqual(@as(u8, 1), ctx.exit_code);
+    // File content must be unchanged after a rejected edit.
+    const got = try target_mod.readFileAll(a, tgt.path);
+    try testing.expectEqualStrings(after_add, got);
+}
+
+test "cmdEdit accepts an @macro schedule" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo");
+    const after_add = try target_mod.readFileAll(a, tgt.path);
+    try cmdEdit(&ctx, tgt, after_add, "demo", "@daily", null);
+    const got = try target_mod.readFileAll(a, tgt.path);
+    // nlp passes already-valid cron (including @macros) through unchanged.
+    try testing.expect(std.mem.indexOf(u8, got, "@daily /bin/echo a") != null);
 }
 
 test "hasInPath finds /bin/sh and rejects garbage" {
