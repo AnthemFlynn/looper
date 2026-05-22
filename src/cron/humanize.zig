@@ -63,11 +63,20 @@ pub fn humanize(a: std.mem.Allocator, raw_in: []const u8) []const u8 {
     const mon = f[3];
     const dow = f[4];
     var time_clause: []const u8 = "";
-    if (std.mem.eql(u8, m, "*") and std.mem.eql(u8, h, "*")) time_clause = "every minute"
-    else if (std.mem.startsWith(u8, m, "*/") and std.mem.eql(u8, h, "*")) time_clause = std.fmt.allocPrint(a, "every {s} minutes", .{m[2..]}) catch raw
-    else if (std.mem.eql(u8, h, "*")) time_clause = std.fmt.allocPrint(a, "every hour at minute {s}", .{m}) catch raw
-    else if (std.mem.startsWith(u8, h, "*/")) time_clause = std.fmt.allocPrint(a, "every {s} hours at minute {s}", .{ h[2..], m }) catch raw
-    else {
+    if (std.mem.eql(u8, m, "*") and std.mem.eql(u8, h, "*")) {
+        time_clause = "every minute";
+    } else if (std.mem.startsWith(u8, m, "*/")) {
+        // "every N minutes" composes with an hour constraint (single
+        // value, range, or step) so the hour scope is not silently lost.
+        const minute_part = std.fmt.allocPrint(a, "every {s} minutes", .{m[2..]}) catch raw;
+        time_clause = if (std.mem.eql(u8, h, "*")) minute_part
+        else if (std.mem.indexOfScalar(u8, h, '-') != null) (std.fmt.allocPrint(a, "{s} between hours {s}", .{ minute_part, h }) catch minute_part)
+        else (std.fmt.allocPrint(a, "{s} at hour {s}", .{ minute_part, h }) catch minute_part);
+    } else if (std.mem.eql(u8, h, "*")) {
+        time_clause = std.fmt.allocPrint(a, "every hour at minute {s}", .{m}) catch raw;
+    } else if (std.mem.startsWith(u8, h, "*/")) {
+        time_clause = std.fmt.allocPrint(a, "every {s} hours at minute {s}", .{ h[2..], m }) catch raw;
+    } else {
         const mi = std.fmt.parseInt(u32, m, 10) catch null;
         const hi = std.fmt.parseInt(u32, h, 10) catch null;
         time_clause = if (mi != null and hi != null) (std.fmt.allocPrint(a, "at {d:0>2}:{d:0>2}", .{ hi.?, mi.? }) catch raw)
@@ -157,4 +166,23 @@ test "relTime hours format" {
     defer arena.deinit();
     const out = relTime(arena.allocator(), 3 * 3600 + 30 * 60);
     try testing.expectEqualStrings("in 3h 30m", out);
+}
+
+test "humanize composes */N minutes with hour range and DOW (commit-3 fix)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const out = humanize(arena.allocator(), "*/15 9-17 * * 1-5");
+    // The hour range and DOW must both survive the */15 branch.
+    try testing.expect(std.mem.indexOf(u8, out, "every 15 minutes") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "9-17") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Mon") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Fri") != null);
+}
+
+test "humanize */N minutes with single hour value" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const out = humanize(arena.allocator(), "*/5 9 * * *");
+    try testing.expect(std.mem.indexOf(u8, out, "every 5 minutes") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "at hour 9") != null);
 }

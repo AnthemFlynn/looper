@@ -82,6 +82,8 @@ pub fn readCrontab(a: std.mem.Allocator, t: Target) ![]u8 {
             try argv.append(a, "ssh");
             try argv.append(a, "-o");
             try argv.append(a, "BatchMode=yes");
+            try argv.append(a, "-o");
+            try argv.append(a, "ConnectTimeout=10");
             try argv.append(a, t.host);
             try argv.append(a, "crontab");
             if (t.user.len > 0) {
@@ -122,6 +124,8 @@ pub fn writeCrontab(a: std.mem.Allocator, t: Target, data: []const u8) !void {
             try argv.append(a, "ssh");
             try argv.append(a, "-o");
             try argv.append(a, "BatchMode=yes");
+            try argv.append(a, "-o");
+            try argv.append(a, "ConnectTimeout=10");
             try argv.append(a, t.host);
             try argv.append(a, "crontab");
             if (t.user.len > 0) {

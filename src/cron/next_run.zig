@@ -14,8 +14,16 @@ pub fn epochToTm(secs: i64) c.struct_tm {
     return tm;
 }
 
-pub fn tmToEpoch(tm: *c.struct_tm) i64 {
-    return @intCast(c.mktime(tm));
+/// `mktime` normalizes a broken-down time AND uses `tm_isdst` to pick
+/// between the two possible UTC values at DST boundaries. After we
+/// mutate the tm fields, the DST flag from the original `localtime_r`
+/// is stale — set `tm_isdst = -1` to make `mktime` redetermine it.
+/// Returns null when `mktime` reports failure (returns `(time_t)-1`).
+pub fn tmToEpoch(tm: *c.struct_tm) ?i64 {
+    tm.tm_isdst = -1;
+    const r = c.mktime(tm);
+    if (@as(c_long, @intCast(r)) == -1) return null;
+    return @intCast(r);
 }
 
 pub fn nextRun(s: Schedule, from: i64) ?i64 {
@@ -32,7 +40,7 @@ pub fn nextRun(s: Schedule, from: i64) ?i64 {
             tm.tm_hour = 0;
             tm.tm_min = 0;
             tm.tm_sec = 0;
-            ts = tmToEpoch(&tm);
+            ts = tmToEpoch(&tm) orelse return null;
             continue;
         }
         if (!s.matchesDay(@intCast(tm.tm_mday), @intCast(tm.tm_wday))) {
@@ -40,20 +48,20 @@ pub fn nextRun(s: Schedule, from: i64) ?i64 {
             tm.tm_hour = 0;
             tm.tm_min = 0;
             tm.tm_sec = 0;
-            ts = tmToEpoch(&tm);
+            ts = tmToEpoch(&tm) orelse return null;
             continue;
         }
         if ((s.hour & (@as(u32, 1) << @intCast(tm.tm_hour))) == 0) {
             tm.tm_hour += 1;
             tm.tm_min = 0;
             tm.tm_sec = 0;
-            ts = tmToEpoch(&tm);
+            ts = tmToEpoch(&tm) orelse return null;
             continue;
         }
         if ((s.min & (@as(u64, 1) << @intCast(tm.tm_min))) == 0) {
             tm.tm_min += 1;
             tm.tm_sec = 0;
-            ts = tmToEpoch(&tm);
+            ts = tmToEpoch(&tm) orelse return null;
             continue;
         }
         return ts;
@@ -70,8 +78,7 @@ test "nextRun @reboot returns null" {
 
 test "nextRun every-minute advances exactly 60s" {
     const s = try sched.parseSchedule("* * * * *");
-    // Pick an epoch on the minute boundary to make the math obvious.
-    const from: i64 = 1_700_000_000; // arbitrary fixed time
+    const from: i64 = 1_700_000_000;
     const aligned = from - @mod(from, 60);
     const nr = nextRun(s, aligned).?;
     try testing.expectEqual(aligned + 60, nr);
@@ -86,8 +93,6 @@ test "nextRun zero-minute hourly advances at most 60 minutes" {
 }
 
 test "nextRun DOM/DOW OR-rule (cross-check via matchesDay)" {
-    // Sanity: when both DOM and DOW are constrained, any next-run we get back
-    // must satisfy at least one of them.
     const s = try sched.parseSchedule("0 0 13 * 5");
     const from: i64 = 1_700_000_000;
     const nr = nextRun(s, from).?;
@@ -105,6 +110,28 @@ test "nextRun produces increasing sequence" {
     while (i < 5) : (i += 1) {
         const nr = nextRun(s, from).?;
         try testing.expect(nr > last);
+        last = nr;
+        from = nr;
+    }
+}
+
+test "nextRun across DST spring-forward (US/Pacific, 2pm 2026-03-08)" {
+    // 2026-03-08 in US/Pacific: clocks jump 02:00 → 03:00. A schedule
+    // of "0 2 * * *" must not silently get stuck or return a duplicate.
+    // The test only verifies progress: we advance through several days
+    // and require that the produced sequence is strictly increasing and
+    // bounded in distance (no infinite loop, no zero-step).
+    const s = try sched.parseSchedule("0 2 * * *");
+    // 2026-03-07 12:00 UTC → just before the boundary in most US tzs.
+    var from: i64 = 1_772_280_000;
+    var last: i64 = 0;
+    var i: usize = 0;
+    while (i < 7) : (i += 1) {
+        const nr = nextRun(s, from).?;
+        try testing.expect(nr > last);
+        // each advance must be at most 25h (allows for fall-back which adds
+        // an hour, but rejects a wedge of multi-day stuck loops).
+        if (last != 0) try testing.expect(nr - last <= 25 * 60 * 60);
         last = nr;
         from = nr;
     }

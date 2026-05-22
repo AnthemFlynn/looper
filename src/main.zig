@@ -68,7 +68,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
         else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) force_help = true
         else if (arg.len > 1 and arg[0] == '-' and !std.ascii.isDigit(arg[1])) {
             posix.eprint("looper: unknown option '{s}' (try: looper help)\n", .{arg});
-            std.process.exit(2);
+            ctx.fail(2);
+            ctx.flush();
+            std.process.exit(ctx.exit_code);
         } else try positionals.append(a, arg);
     }
 
@@ -91,15 +93,20 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
     if (cmd == .unknown) {
         posix.eprint("looper: unknown command '{s}' (try: looper help)\n", .{positionals.items[0]});
-        std.process.exit(2);
+        ctx.fail(2);
+        ctx.flush();
+        std.process.exit(ctx.exit_code);
     }
     if (cmd == .explain) {
         if (rest.len < 1) {
             posix.eprint("looper: explain needs a schedule\n", .{});
-            std.process.exit(2);
+            ctx.fail(2);
+            ctx.flush();
+            std.process.exit(ctx.exit_code);
         }
         try cmds.cmdExplain(&ctx, rest[0]);
         ctx.flush();
+        if (ctx.exit_code != 0) std.process.exit(ctx.exit_code);
         return;
     }
 
@@ -139,7 +146,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             .add => {
                 if (rest.len < 2) {
                     posix.eprint("looper: add needs <schedule> <command>\n", .{});
-                    ctx_mod.g_fail();
+                    ctx.fail(1);
                     break;
                 }
                 try cmds.cmdAdd(&ctx, t, content, rest[0], rest[1], want_id);
@@ -147,7 +154,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             .rm => {
                 if (rest.len < 1) {
                     posix.eprint("looper: rm needs an id\n", .{});
-                    ctx_mod.g_fail();
+                    ctx.fail(1);
                     break;
                 }
                 try cmds.cmdRm(&ctx, t, content, rest);
@@ -157,7 +164,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             .show => {
                 if (rest.len < 1) {
                     posix.eprint("looper: show needs an id\n", .{});
-                    ctx_mod.g_fail();
+                    ctx.fail(1);
                     break;
                 }
                 try cmds.cmdShow(&ctx, t, content, rest[0]);
@@ -165,7 +172,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             .run => {
                 if (rest.len < 1) {
                     posix.eprint("looper: run needs an id\n", .{});
-                    ctx_mod.g_fail();
+                    ctx.fail(1);
                     break;
                 }
                 try cmds.cmdRun(&ctx, t, content, rest[0]);
@@ -179,5 +186,5 @@ pub fn main(init: std.process.Init.Minimal) !void {
         ctx.flush();
     }
     ctx.flush();
-    if (ctx_mod.g_exit != 0) std.process.exit(ctx_mod.g_exit);
+    if (ctx.exit_code != 0) std.process.exit(ctx.exit_code);
 }

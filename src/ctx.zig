@@ -22,6 +22,9 @@ pub const Ctx = struct {
     yes: bool = false,
     quiet: bool = false,
     buf: std.ArrayList(u8) = .empty,
+    /// First-failure wins. Stays 0 until something fails; subsequent
+    /// failures don't overwrite. `main` reads this at end-of-run.
+    exit_code: u8 = 0,
     pub fn emit(self: *Ctx, comptime fmt: []const u8, args: anytype) void {
         const s = std.fmt.allocPrint(self.a, fmt, args) catch return;
         self.buf.appendSlice(self.a, s) catch {};
@@ -34,14 +37,43 @@ pub const Ctx = struct {
     pub fn k(self: *Ctx, code: []const u8) []const u8 {
         return if (self.color) code else "";
     }
+    /// Mark this run as failed. Records the first failure code only.
+    pub fn fail(self: *Ctx, code: u8) void {
+        if (self.exit_code == 0) self.exit_code = code;
+    }
 };
-
-pub var g_exit: u8 = 0;
-pub fn g_fail() void {
-    if (g_exit == 0) g_exit = 1;
-}
 
 pub fn aw(a: std.mem.Allocator, list: *std.ArrayList(u8), comptime fmt: []const u8, args: anytype) void {
     const s = std.fmt.allocPrint(a, fmt, args) catch return;
     list.appendSlice(a, s) catch {};
+}
+
+const testing = std.testing;
+
+test "Ctx.fail records first failure only" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = Ctx{ .a = arena.allocator() };
+    try testing.expectEqual(@as(u8, 0), ctx.exit_code);
+    ctx.fail(2);
+    try testing.expectEqual(@as(u8, 2), ctx.exit_code);
+    ctx.fail(1); // subsequent failure does not overwrite
+    try testing.expectEqual(@as(u8, 2), ctx.exit_code);
+}
+
+test "Ctx.k returns empty string when color off" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = Ctx{ .a = arena.allocator(), .color = false };
+    try testing.expectEqualStrings("", ctx.k(RED));
+    ctx.color = true;
+    try testing.expectEqualStrings(RED, ctx.k(RED));
+}
+
+test "Ctx.emit appends to buf" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = Ctx{ .a = arena.allocator() };
+    ctx.emit("hello {s} {d}\n", .{ "world", 42 });
+    try testing.expectEqualStrings("hello world 42\n", ctx.buf.items);
 }

@@ -7,6 +7,7 @@ pub const c = @cImport({
     @cDefine("_FORTIFY_SOURCE", "0");
     @cInclude("unistd.h");
     @cInclude("stdlib.h");
+    @cInclude("stdio.h"); // rename(2)
     @cInclude("string.h");
     @cInclude("sys/wait.h");
     @cInclude("sys/stat.h");
@@ -22,6 +23,21 @@ pub fn getenv(name: [*:0]const u8) ?[]const u8 {
 
 pub fn nowEpoch() i64 {
     return @intCast(c.time(null));
+}
+
+/// Loop `write(2)` until `bytes` is fully written or an error occurs.
+/// `write(2)` can return a short count; for a single non-looped call,
+/// payloads larger than `PIPE_BUF` (~4–64KB) may be silently truncated.
+/// Returns `error.WriteFailed` on real I/O error (including `EPIPE` —
+/// the peer closed the read side, so further writes will not succeed).
+pub fn writeAll(fd: c_int, bytes: []const u8) !void {
+    var written: usize = 0;
+    while (written < bytes.len) {
+        const n = c.write(fd, bytes.ptr + written, bytes.len - written);
+        if (n < 0) return error.WriteFailed;
+        if (n == 0) return error.WriteFailed; // peer hung up / no progress
+        written += @intCast(n);
+    }
 }
 
 pub const RunResult = struct { code: i32, out: []u8 };
@@ -51,7 +67,10 @@ pub fn runCapture(a: std.mem.Allocator, argv: []const []const u8, stdin_bytes: ?
     _ = c.close(outpipe[1]);
     if (stdin_bytes) |b| {
         _ = c.close(inpipe[0]);
-        if (b.len > 0) _ = c.write(inpipe[1], b.ptr, b.len);
+        if (b.len > 0) writeAll(inpipe[1], b) catch {
+            // child may have exited early; we still close the pipe and
+            // let `waitpid` surface its real exit code below.
+        };
         _ = c.close(inpipe[1]);
     }
     var out: std.ArrayList(u8) = .empty;
@@ -87,4 +106,36 @@ pub fn eprint(comptime fmt: []const u8, args: anytype) void {
     var b: [2048]u8 = undefined;
     const s = std.fmt.bufPrint(&b, fmt, args) catch return;
     _ = c.write(2, s.ptr, s.len);
+}
+
+const testing = std.testing;
+
+test "runCapture stdin payload larger than PIPE_BUF round-trips intact" {
+    // Build a 256KB payload; PIPE_BUF on Darwin is 512, on Linux 4096 —
+    // anything past that is where unloop'd write(2) silently truncated
+    // before the writeAll fix.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const size = 256 * 1024;
+    const payload = try a.alloc(u8, size);
+    for (payload, 0..) |*ch, i| ch.* = 'A' + @as(u8, @intCast(i % 26));
+    const r = try runCapture(a, &[_][]const u8{ "/bin/cat" }, payload);
+    try testing.expectEqual(@as(i32, 0), r.code);
+    try testing.expectEqual(size, r.out.len);
+    try testing.expectEqualSlices(u8, payload, r.out);
+}
+
+test "runCapture exit code surfaces" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const r = try runCapture(arena.allocator(), &[_][]const u8{ "/bin/sh", "-c", "exit 42" }, null);
+    try testing.expectEqual(@as(i32, 42), r.code);
+}
+
+test "runCapture nonexistent binary returns 127" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const r = try runCapture(arena.allocator(), &[_][]const u8{ "/this/does/not/exist" }, null);
+    try testing.expectEqual(@as(i32, 127), r.code);
 }

@@ -27,14 +27,29 @@ pub fn truncEllipsis(a: std.mem.Allocator, s: []const u8, w: usize) []const u8 {
     return std.fmt.allocPrint(a, "{s}\xe2\x80\xa6", .{s[0 .. w - 1]}) catch s;
 }
 
+/// RFC 8259-compliant JSON string escaping. Covers the named escapes
+/// (`\"`, `\\`, `\b`, `\f`, `\n`, `\r`, `\t`) and every remaining
+/// control byte U+0000–U+001F as `\u00XX`. Non-ASCII bytes pass
+/// through verbatim — the input is treated as opaque UTF-8.
 pub fn jsonEsc(a: std.mem.Allocator, s: []const u8) []const u8 {
     var b: std.ArrayList(u8) = .empty;
     for (s) |ch| switch (ch) {
         '"' => b.appendSlice(a, "\\\"") catch {},
         '\\' => b.appendSlice(a, "\\\\") catch {},
-        '\n' => b.appendSlice(a, "\\n") catch {},
-        '\t' => b.appendSlice(a, "\\t") catch {},
-        else => b.append(a, ch) catch {},
+        0x08 => b.appendSlice(a, "\\b") catch {},
+        0x09 => b.appendSlice(a, "\\t") catch {},
+        0x0a => b.appendSlice(a, "\\n") catch {},
+        0x0c => b.appendSlice(a, "\\f") catch {},
+        0x0d => b.appendSlice(a, "\\r") catch {},
+        else => {
+            if (ch < 0x20) {
+                const esc = std.fmt.allocPrint(a, "\\u00{x:0>2}", .{ch}) catch {
+                    b.append(a, ch) catch {};
+                    continue;
+                };
+                b.appendSlice(a, esc) catch {};
+            } else b.append(a, ch) catch {};
+        },
     };
     return b.toOwnedSlice(a) catch s;
 }
@@ -101,11 +116,31 @@ test "padTo pads short strings; passes long through" {
     try testing.expectEqualStrings("hello", padTo(arena.allocator(), "hello", 3));
 }
 
-test "jsonEsc escapes the four currently-handled chars" {
+test "jsonEsc escapes the named characters" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     try testing.expectEqualStrings("a\\\"b", jsonEsc(arena.allocator(), "a\"b"));
     try testing.expectEqualStrings("a\\\\b", jsonEsc(arena.allocator(), "a\\b"));
     try testing.expectEqualStrings("a\\nb", jsonEsc(arena.allocator(), "a\nb"));
     try testing.expectEqualStrings("a\\tb", jsonEsc(arena.allocator(), "a\tb"));
+    try testing.expectEqualStrings("a\\bb", jsonEsc(arena.allocator(), "a\x08b"));
+    try testing.expectEqualStrings("a\\fb", jsonEsc(arena.allocator(), "a\x0cb"));
+    try testing.expectEqualStrings("a\\rb", jsonEsc(arena.allocator(), "a\rb"));
+}
+
+test "jsonEsc encodes other control chars as \\u00XX" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings("\\u0000", jsonEsc(a, "\x00"));
+    try testing.expectEqualStrings("\\u0001", jsonEsc(a, "\x01"));
+    try testing.expectEqualStrings("\\u001f", jsonEsc(a, "\x1f"));
+    // 0x20 (space) is printable and passes through.
+    try testing.expectEqualStrings(" ", jsonEsc(a, " "));
+}
+
+test "jsonEsc passes UTF-8 multibyte sequences verbatim" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings("café", jsonEsc(arena.allocator(), "café"));
 }

@@ -30,7 +30,7 @@ pub fn applyMutation(ctx: *Ctx, t: Target, content: []const u8, new_content: []c
     const bpath = backup_mod.doBackup(ctx.a, t, content);
     target_mod.writeCrontab(ctx.a, t, new_content) catch |e| {
         posix.eprint("looper: write failed on {s}: {s}\n", .{ t.label(ctx.a), @errorName(e) });
-        ctx_mod.g_fail();
+        ctx.fail(1);
         return;
     };
     if (!ctx.quiet) {
@@ -105,12 +105,12 @@ pub fn cmdAdd(ctx: *Ctx, t: Target, content: []const u8, schedule: []const u8, c
         posix.eprint("looper: couldn't read schedule '{s}'\n", .{schedule});
         posix.eprint("  use cron (\"*/15 9-17 * * 1-5\") or plain English (\"every weekday at 9am\")\n", .{});
         posix.eprint("  preview with: looper explain '{s}'\n", .{schedule});
-        ctx_mod.g_fail();
+        ctx.fail(1);
         return;
     };
     _ = sched_mod.parseSchedule(cron) catch |e| {
         posix.eprint("looper: invalid schedule '{s}': {s}\n", .{ cron, @errorName(e) });
-        ctx_mod.g_fail();
+        ctx.fail(1);
         return;
     };
     if (!std.mem.eql(u8, cron, schedule))
@@ -142,7 +142,7 @@ pub fn cmdToggle(ctx: *Ctx, t: Target, content: []const u8, ids: [][]const u8, e
             touched += 1;
         } else {
             posix.eprint("looper: no managed job '{s}' on {s}\n", .{ id, t.label(ctx.a) });
-            ctx_mod.g_fail();
+            ctx.fail(1);
         }
     }
     if (touched == 0) return;
@@ -167,7 +167,7 @@ pub fn cmdRm(ctx: *Ctx, t: Target, content: []const u8, ids: [][]const u8) !void
             }
         }
         posix.eprint("looper: no job '{s}' on {s}\n", .{ id, t.label(ctx.a) });
-        ctx_mod.g_fail();
+        ctx.fail(1);
     }
     if (rm.items.len == 0) return;
     if (!display.confirm(ctx, "Remove {d} job(s) from {s}?", .{ rm.items.len, t.label(ctx.a) })) {
@@ -189,7 +189,7 @@ pub fn cmdShow(ctx: *Ctx, t: Target, content: []const u8, id: []const u8) !void 
     const ct = try model.parseCrontab(ctx.a, content);
     const idx = ct.findIndex(id) orelse {
         posix.eprint("looper: no managed job '{s}' on {s}\n", .{ id, t.label(ctx.a) });
-        ctx_mod.g_fail();
+        ctx.fail(1);
         return;
     };
     const j = ct.items.items[idx].job;
@@ -221,7 +221,7 @@ pub fn cmdRun(ctx: *Ctx, t: Target, content: []const u8, id: []const u8) !void {
     const ct = try model.parseCrontab(ctx.a, content);
     const idx = ct.findIndex(id) orelse {
         posix.eprint("looper: no managed job '{s}' on {s}\n", .{ id, t.label(ctx.a) });
-        ctx_mod.g_fail();
+        ctx.fail(1);
         return;
     };
     const cmd = ct.items.items[idx].job.command;
@@ -230,6 +230,10 @@ pub fn cmdRun(ctx: *Ctx, t: Target, content: []const u8, id: []const u8) !void {
     var argv: std.ArrayList([]const u8) = .empty;
     if (t.kind == .remote) {
         try argv.append(ctx.a, "ssh");
+        try argv.append(ctx.a, "-o");
+        try argv.append(ctx.a, "BatchMode=yes");
+        try argv.append(ctx.a, "-o");
+        try argv.append(ctx.a, "ConnectTimeout=10");
         try argv.append(ctx.a, t.host);
         try argv.append(ctx.a, cmd);
     } else {
@@ -238,7 +242,13 @@ pub fn cmdRun(ctx: *Ctx, t: Target, content: []const u8, id: []const u8) !void {
         try argv.append(ctx.a, cmd);
     }
     const code = posix.runInherit(ctx.a, argv.items) catch 1;
-    if (code != 0) ctx_mod.g_fail();
+    if (code != 0) {
+        // Clamp to u8 so the exit code surfaces in shell `$?`. A negative
+        // child status (e.g., killed by signal, returns -1 from waitpid)
+        // collapses to 1; otherwise we propagate the real value.
+        const u: u8 = if (code < 0 or code > 255) 1 else @intCast(code);
+        ctx.fail(u);
+    }
     ctx.emit("{s}exit {d}{s}\n", .{ if (code == 0) ctx.k(ctx_mod.GREEN) else ctx.k(ctx_mod.RED), code, ctx.k(ctx_mod.RESET) });
 }
 
@@ -246,12 +256,12 @@ pub fn cmdExplain(ctx: *Ctx, input: []const u8) !void {
     const schedule = nlp.toCron(ctx.a, input) orelse {
         posix.eprint("looper: couldn't read schedule '{s}'\n", .{input});
         posix.eprint("  use cron (\"*/15 9-17 * * 1-5\") or plain English (\"every weekday at 9am\")\n", .{});
-        ctx_mod.g_fail();
+        ctx.fail(1);
         return;
     };
     const sched = sched_mod.parseSchedule(schedule) catch |e| {
         posix.eprint("looper: invalid schedule '{s}': {s}\n", .{ schedule, @errorName(e) });
-        ctx_mod.g_fail();
+        ctx.fail(1);
         return;
     };
     if (!std.mem.eql(u8, schedule, input))
@@ -276,7 +286,7 @@ pub fn cmdExplain(ctx: *Ctx, input: []const u8) !void {
 pub fn cmdBackup(ctx: *Ctx, t: Target, content: []const u8) !void {
     const p = backup_mod.doBackup(ctx.a, t, content) orelse {
         posix.eprint("looper: backup failed\n", .{});
-        ctx_mod.g_fail();
+        ctx.fail(1);
         return;
     };
     ctx.emit("{s}\xe2\x9c\x93{s} backed up {s} to {s}\n", .{ ctx.k(ctx_mod.GREEN), ctx.k(ctx_mod.RESET), t.label(ctx.a), p });
@@ -285,12 +295,12 @@ pub fn cmdBackup(ctx: *Ctx, t: Target, content: []const u8) !void {
 pub fn cmdRestore(ctx: *Ctx, t: Target, current: []const u8, given: ?[]const u8) !void {
     const path = given orelse backup_mod.newestBackup(ctx.a, t) orelse {
         posix.eprint("looper: no backups for {s}\n", .{t.label(ctx.a)});
-        ctx_mod.g_fail();
+        ctx.fail(1);
         return;
     };
     const data = target_mod.readFileAll(ctx.a, path) catch {
         posix.eprint("looper: cannot read backup {s}\n", .{path});
-        ctx_mod.g_fail();
+        ctx.fail(1);
         return;
     };
     ctx.emit("{s}restoring {s} from {s}{s}\n", .{ ctx.k(ctx_mod.DIM), t.label(ctx.a), path, ctx.k(ctx_mod.RESET) });
@@ -300,8 +310,17 @@ pub fn cmdRestore(ctx: *Ctx, t: Target, current: []const u8, given: ?[]const u8)
 pub fn cmdImport(ctx: *Ctx, t: Target, content: []const u8) !void {
     var ct = try model.parseCrontab(ctx.a, content);
     var n: usize = 0;
+    var skipped: usize = 0;
     for (ct.items.items) |*it| switch (it.*) {
         .job => |*j| if (j.foreign) {
+            // Validate the schedule before adopting; lines that aren't real
+            // cron stay foreign and visible in `ls` rather than being
+            // promoted to a managed job that won't ever fire.
+            _ = sched_mod.parseSchedule(j.schedule) catch {
+                posix.eprint("looper: skipping unmanaged line with unparseable schedule: {s} {s}\n", .{ j.schedule, j.command });
+                skipped += 1;
+                continue;
+            };
             j.foreign = false;
             j.enabled = true;
             j.id = display.slugUnique(ctx.a, &ct, j.command);
@@ -309,6 +328,7 @@ pub fn cmdImport(ctx: *Ctx, t: Target, content: []const u8) !void {
         },
         else => {},
     };
+    if (skipped > 0) ctx.emit("{s}skipped {d} unmanaged line(s) that don't parse as cron{s}\n", .{ ctx.k(ctx_mod.DIM), skipped, ctx.k(ctx_mod.RESET) });
     if (n == 0) {
         ctx.emit("{s}no unmanaged jobs to import on {s}{s}\n", .{ ctx.k(ctx_mod.DIM), t.label(ctx.a), ctx.k(ctx_mod.RESET) });
         return;
