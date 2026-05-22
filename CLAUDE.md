@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`looper` is a Zig 0.16 CLI that manages cron jobs — locally, for another user, on remote hosts over `ssh`, or in a plain crontab file. The source lives under `src/` (~1100 lines across 11 modules), libc-only, no third-party dependencies. Built with `build.zig` (`zig build`); cross-targets are passed via `-Dtarget=...`.
+`looper` is a Zig 0.16 CLI that manages cron jobs — locally, for another user, on remote hosts over `ssh`, or in a plain crontab file. The source lives under `src/` (~1400 lines across 16 modules), libc-only, no third-party dependencies. Built with `build.zig` (`zig build`); cross-targets are passed via `-Dtarget=...`.
 
 ## Build & run
 
@@ -23,10 +23,11 @@ zig build run -- -f /tmp/test.crontab ls           # run with args
 
 ```
 src/
-  main.zig                Entry point: argv parsing, target list, per-target dispatch loop
-  ctx.zig                 Ctx struct (allocator, flags, output buffer), color constants, g_exit
-  posix.zig               Single @cImport for libc; runCapture / runInherit / getenv / nowEpoch
-  commands.zig            applyMutation + cmdLs/Add/Rm/Toggle/Show/Run/Explain/Backup/Restore/Import
+  main.zig                Entry point: Cmd enum + parseCmd; orchestrates argv→cli→targets→dispatch
+  cli.zig                 Pure argv parser (ParsedArgs) and target-list builder; all tested in isolation
+  ctx.zig                 Ctx struct (allocator, flags, output buffer, exit_code accumulator), aw helper
+  posix.zig               Single @cImport for libc; runCapture / runInherit / writeAll / getenv / nowEpoch
+  commands.zig            applyMutation + cmdLs/Add/Rm/Toggle/Show/Run/Explain/Backup/Restore/Import/Doctor
   cron/
     schedule.zig          Schedule bitset + parseSchedule + fieldBounds + parseField + nameToNum
     next_run.zig          nextRun using DOM/DOW OR-rule; libc localtime_r/mktime for DST
@@ -37,6 +38,7 @@ src/
     target.zig            Target/TargetKind + readCrontab/writeCrontab (switch dispatch over 3 backends)
     backup.zig            doBackup, newestBackup, stateDir, backupDir, utcStamp, mkdirP
   ui/
+    colors.zig            ANSI escape constants (BOLD/DIM/RED/…); consumed via ctx.k(CODE)
     display.zig           padTo, truncEllipsis, jsonEsc, termWidth, slugFromCommand, confirm
     diff.zig              LCS-based printDiff for --dry-run
     help.zig              printHelp + VERSION
@@ -57,7 +59,8 @@ Inline `test "..." { ... }` blocks colocated at the bottom of each module. `zig 
 - **No "remove all" command exists, by design.** `crontab -r` is the footgun this tool exists to avoid.
 - **Disabled jobs keep their definition.** `disable` comments the payload line but leaves the marker (`enabled=0`); do not delete on disable.
 - **Color is opt-in to a tty and `NO_COLOR`.** Use `ctx.k(CODE)` rather than hardcoding escape sequences so `--no-color` / `NO_COLOR` keep working.
-- **Output goes through `ctx.emit` + `ctx.flush`,** not direct stdio. Errors go through `posix.eprint`. `ctx_mod.g_exit` / `g_fail()` accumulate non-fatal failures so a multi-target run still surfaces a non-zero exit.
+- **Output goes through `ctx.emit` + `ctx.flush`,** not direct stdio. Errors go through `posix.eprint`. `Ctx.exit_code` + `ctx.fail(code)` accumulate non-fatal failures (first-failure-wins) so a multi-target run still surfaces a non-zero exit.
+- **`doctor` owns its own target loop.** It branches before the standard per-target read loop in `main.zig` because the read failures the loop treats as fatal-per-target are exactly what doctor is reporting on. New "diagnostic" commands should follow the same pattern.
 
 ## SOLID lines
 
@@ -89,4 +92,9 @@ zig build run -- -f /tmp/test.crontab --dry-run rm demo
 # Pure parser exercise — writes nothing
 zig build run -- explain "*/15 9-17 * * mon-fri"
 zig build run -- explain "every 15 min from 9am to 5pm on weekdays"
+
+# Preflight — checks binaries, backup dir, hosts file, and per-target reach
+zig build run -- doctor
+zig build run -- -H some.host doctor
+zig build run -- --all doctor
 ```

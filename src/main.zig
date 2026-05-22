@@ -11,15 +11,15 @@ const help_mod = @import("ui/help.zig");
 const colors = @import("ui/colors.zig");
 const target_mod = @import("crontab/target.zig");
 
-const Cmd = enum { ls, add, rm, enable, disable, show, run, explain, import, backup, restore, version, help, unknown };
+const Cmd = enum { ls, add, rm, enable, disable, show, run, explain, import, backup, restore, doctor, version, help, unknown };
 
 fn parseCmd(s: []const u8) Cmd {
     const map = .{
-        .{ "ls", Cmd.ls },           .{ "list", Cmd.ls },       .{ "add", Cmd.add },         .{ "set", Cmd.add },
-        .{ "rm", Cmd.rm },           .{ "remove", Cmd.rm },     .{ "delete", Cmd.rm },       .{ "enable", Cmd.enable },
-        .{ "disable", Cmd.disable }, .{ "show", Cmd.show },     .{ "run", Cmd.run },         .{ "explain", Cmd.explain },
-        .{ "import", Cmd.import },   .{ "backup", Cmd.backup }, .{ "restore", Cmd.restore }, .{ "version", Cmd.version },
-        .{ "help", Cmd.help },
+        .{ "ls", Cmd.ls },           .{ "list", Cmd.ls },         .{ "add", Cmd.add },         .{ "set", Cmd.add },
+        .{ "rm", Cmd.rm },           .{ "remove", Cmd.rm },       .{ "delete", Cmd.rm },       .{ "enable", Cmd.enable },
+        .{ "disable", Cmd.disable }, .{ "show", Cmd.show },       .{ "run", Cmd.run },         .{ "explain", Cmd.explain },
+        .{ "import", Cmd.import },   .{ "backup", Cmd.backup },   .{ "restore", Cmd.restore }, .{ "doctor", Cmd.doctor },
+        .{ "version", Cmd.version }, .{ "help", Cmd.help },
     };
     inline for (map) |e| if (std.mem.eql(u8, s, e[0])) return e[1];
     return .unknown;
@@ -84,21 +84,34 @@ pub fn main(init: std.process.Init.Minimal) !void {
     if (resolved.file_path.len == 0 and resolved.hosts.len == 0 and !resolved.use_all) {
         if (posix.getenv("LOOPER_CRONTAB_FILE")) |fp| resolved.file_path = fp;
     }
+    // Compute the hosts-file path unconditionally so `doctor` can report
+    // on it even when --all wasn't asked for.
+    const hosts_cfg_path = if (posix.getenv("XDG_CONFIG_HOME")) |x|
+        (std.fmt.allocPrint(a, "{s}/looper/hosts", .{x}) catch "")
+    else
+        (std.fmt.allocPrint(a, "{s}/.config/looper/hosts", .{posix.getenv("HOME") orelse "."}) catch "");
     var hosts_content: []const u8 = "";
     if (resolved.use_all) {
-        const cfg = if (posix.getenv("XDG_CONFIG_HOME")) |x|
-            (std.fmt.allocPrint(a, "{s}/looper/hosts", .{x}) catch "")
-        else
-            (std.fmt.allocPrint(a, "{s}/.config/looper/hosts", .{posix.getenv("HOME") orelse "."}) catch "");
-        hosts_content = target_mod.readFileAll(a, cfg) catch "";
-        if (hosts_content.len == 0) {
-            posix.eprint("looper: --all but no hosts in {s}\n", .{cfg});
+        hosts_content = target_mod.readFileAll(a, hosts_cfg_path) catch "";
+        // `doctor` should still run so it can diagnose the missing/empty
+        // hosts file; every other command needs at least one usable host.
+        if (hosts_content.len == 0 and cmd != .doctor) {
+            posix.eprint("looper: --all but no hosts in {s}\n", .{hosts_cfg_path});
             return;
         }
     }
     const targets = try cli.buildTargets(a, resolved, hosts_content);
-    if (resolved.use_all and targets.len == 0) {
+    if (resolved.use_all and targets.len == 0 and cmd != .doctor) {
         posix.eprint("looper: --all but no usable hosts (every line is blank or a comment)\n", .{});
+        return;
+    }
+
+    // `doctor` owns its own iteration: it must keep going past the per-
+    // target read failures that the loop below treats as fatal-per-target.
+    if (cmd == .doctor) {
+        try cmds.cmdDoctor(&ctx, targets, hosts_cfg_path, resolved.use_all);
+        ctx.flush();
+        if (ctx.exit_code != 0) std.process.exit(ctx.exit_code);
         return;
     }
 

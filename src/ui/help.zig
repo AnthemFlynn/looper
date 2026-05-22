@@ -25,6 +25,7 @@ pub fn printHelp(ctx: *ctx_mod.Ctx) void {
     ctx.emit("  import                    Adopt existing, unmanaged crontab jobs\n", .{});
     ctx.emit("  backup                    Snapshot the crontab to the state directory\n", .{});
     ctx.emit("  restore [file]            Roll back to the newest (or named) snapshot\n", .{});
+    ctx.emit("  doctor                    Preflight: crontab/ssh, backup dir, hosts file, targets\n", .{});
     ctx.emit("  help, version\n", .{});
     ctx.emit("\n", .{});
     ctx.emit("{s}TARGET{s} {s}(default: your own local crontab){s}\n", .{ B, R, D, R });
