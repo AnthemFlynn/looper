@@ -1,0 +1,21 @@
+# Build artifacts (rebuildable; ~10MB combined — kept out of history)
+looper
+looper-x86_64-linux-musl
+looper-aarch64-linux-musl
+looper-aarch64-macos
+looper-linux-x86_64
+*.o
+zig-cache/
+zig-out/
+.zig-cache/
+
+# OS cruft
+.DS_Store
+
+# Tool state (GSD / auto-checkpoint handoffs)
+.planning/
+
+# Editor
+.vscode/
+.idea/
+*.swp
