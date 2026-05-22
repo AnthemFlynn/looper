@@ -92,6 +92,7 @@ Options
       --json               machine-readable output (ls, show, explain, dry-run)
   -q, --quiet              only print errors
       --no-color           disable color (also honored: NO_COLOR)
+      --check-command      (add) warn if the command binary isn't on the target
 ```
 
 ### Examples
@@ -119,6 +120,12 @@ looper run db-backup
 # The whole fleet at once
 looper --all ls
 looper -H pi@nas -H pi@media add --id reboot-clean "@reboot" "/opt/clean.sh"
+
+# Verify the binary actually exists on the target before scheduling it.
+# Warns and continues — most cron failures are silent PATH/environment
+# failures the user only finds out about from the mail spool the next day.
+looper -H pi@nas add --check-command --id rep "@daily" "/opt/bin/report.sh"
+# → ! command '/opt/bin/report.sh' not found on pi@nas — cron may fail to run
 ```
 
 ## Natural-language schedules

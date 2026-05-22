@@ -34,6 +34,13 @@ pub const ParsedArgs = struct {
     /// a usage error rather than picking a default that might delete
     /// more than the user expected.
     keep: ?usize,
+    /// `add --check-command`: opt-in preflight that warns when the
+    /// command's first executable token isn't found on the target.
+    /// Non-blocking — the add still proceeds; the user just gets the
+    /// "you probably need an absolute path / your PATH is different
+    /// under cron" heads-up before learning about it from a silent
+    /// mail spool tomorrow morning.
+    check_command: bool,
     force_help: bool,
     /// Set to the offending arg when an unknown option (e.g. `--frob`)
     /// is encountered. Parsing stops at the first unknown option so
@@ -60,6 +67,7 @@ pub fn parseArgv(a: std.mem.Allocator, argv: []const []const u8, ctx: *ctx_mod.C
         .new_command = null,
         .from_stamp = null,
         .keep = null,
+        .check_command = false,
         .force_help = false,
         .bad_option = null,
     };
@@ -152,6 +160,10 @@ pub fn parseArgv(a: std.mem.Allocator, argv: []const []const u8, ctx: *ctx_mod.C
         }
         if (std.mem.eql(u8, arg, "--no-target-tz")) {
             ctx.no_target_tz = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--check-command")) {
+            p.check_command = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
@@ -318,6 +330,26 @@ test "parseArgv --keep N parses to usize" {
     try testing.expectEqual(@as(usize, 20), p.keep.?);
 }
 
+test "parseArgv --check-command sets the flag" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = newCtx(arena.allocator());
+    const argv = [_][]const u8{ "looper", "add", "--check-command", "@daily", "/usr/local/bin/foo" };
+    const p = try parseArgv(arena.allocator(), &argv, &ctx);
+    try testing.expect(p.check_command);
+    try testing.expectEqual(@as(usize, 3), p.positionals.len);
+    try testing.expectEqualStrings("add", p.positionals[0]);
+}
+
+test "parseArgv --check-command default is false" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = newCtx(arena.allocator());
+    const argv = [_][]const u8{ "looper", "add", "@daily", "/usr/local/bin/foo" };
+    const p = try parseArgv(arena.allocator(), &argv, &ctx);
+    try testing.expect(!p.check_command);
+}
+
 test "parseArgv --keep with non-numeric value sets bad_option" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -399,6 +431,7 @@ test "buildTargets default = local" {
         .new_command = null,
         .from_stamp = null,
         .keep = null,
+        .check_command = false,
         .force_help = false,
         .bad_option = null,
     };
@@ -421,6 +454,7 @@ test "buildTargets file path → one file target" {
         .new_command = null,
         .from_stamp = null,
         .keep = null,
+        .check_command = false,
         .force_help = false,
         .bad_option = null,
     };
@@ -445,6 +479,7 @@ test "buildTargets -H hosts → one remote per host, sharing user" {
         .new_command = null,
         .from_stamp = null,
         .keep = null,
+        .check_command = false,
         .force_help = false,
         .bad_option = null,
     };
@@ -469,6 +504,7 @@ test "buildTargets --all parses hosts file, ignores blank/comment lines" {
         .new_command = null,
         .from_stamp = null,
         .keep = null,
+        .check_command = false,
         .force_help = false,
         .bad_option = null,
     };
@@ -501,6 +537,7 @@ test "buildTargets --all empty hosts file → empty list" {
         .new_command = null,
         .from_stamp = null,
         .keep = null,
+        .check_command = false,
         .force_help = false,
         .bad_option = null,
     };
@@ -522,6 +559,7 @@ test "buildTargets --all + -u applies user to every remote" {
         .new_command = null,
         .from_stamp = null,
         .keep = null,
+        .check_command = false,
         .force_help = false,
         .bad_option = null,
     };

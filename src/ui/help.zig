@@ -44,6 +44,7 @@ pub fn printHelp(ctx: *ctx_mod.Ctx) void {
     ctx.emit("  -q, --quiet               Print only errors\n", .{});
     ctx.emit("      --no-color            Disable color (also obeys NO_COLOR)\n", .{});
     ctx.emit("      --no-target-tz        Skip remote TZ probe; render everything as controller-local\n", .{});
+    ctx.emit("      --check-command       (add) warn if the command's binary isn't found on the target\n", .{});
     ctx.emit("  -h, --help                Show this help\n", .{});
     ctx.emit("\n", .{});
     ctx.emit("{s}SCHEDULES{s} {s}- cron, a macro, or plain English, all stored as standard cron{s}\n", .{ B, R, D, R });
@@ -60,6 +61,7 @@ pub fn printHelp(ctx: *ctx_mod.Ctx) void {
     ctx.emit("  {s}  {s}# every host in the fleet{s}\n", .{ "looper --all ls                               ", D, R });
     ctx.emit("  {s}  {s}# pipe to jq, prometheus_exporter, etc.{s}\n", .{ "looper show db-backup --json                  ", D, R });
     ctx.emit("  {s}  {s}# list snapshots, then roll back to one{s}\n", .{ "looper backups && looper restore --from 20260521", D, R });
+    ctx.emit("  {s}  {s}# warn if the binary isn't on the target{s}\n", .{ "looper -H nas add --check-command @daily /opt/bin/rep", D, R });
     ctx.emit("\n", .{});
     ctx.emit("Every change is backed up first; there is deliberately no \"delete everything\".\n", .{});
 }

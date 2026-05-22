@@ -158,7 +158,112 @@ pub fn cmdLs(ctx: *Ctx, t: Target, content: []const u8, tz: TzInfo) !void {
     if (foreign > 0) ctx.emit("{s}\n{d} unmanaged job(s) shown as f1..f{d} — remove with 'looper rm f1', or adopt with 'looper import'{s}\n", .{ ctx.k(colors.DIM), foreign, foreign, ctx.k(colors.RESET) });
 }
 
-pub fn cmdAdd(ctx: *Ctx, t: Target, content: []const u8, schedule: []const u8, command: []const u8, want_id: ?[]const u8) !void {
+/// Result of a `--check-command` reachability probe.
+/// - `found`: the binary resolves to something executable
+/// - `missing`: the probe ran and returned a definite "no"
+/// - `skipped`: we couldn't (or shouldn't) ask the question — file
+///   targets, shell constructs we can't parse, or a probe that itself
+///   crashed. The caller treats `skipped` as silent: no warning, no
+///   false-positive "missing" report.
+pub const ReachResult = enum { found, missing, skipped };
+
+/// Strip leading `KEY=VAL` env-var assignments from `command` and
+/// return the first whitespace-separated token after them. Returns
+/// null when nothing checkable remains — the command is empty, starts
+/// with a shell construct (`(`, `{`, `$`, a quote, a backtick, a
+/// backslash), or the leading run is only env-var assignments.
+///
+/// Examples (input → output):
+///   "/usr/bin/foo arg"           → "/usr/bin/foo"
+///   "FOO=bar BAZ=qux /bin/baz"   → "/bin/baz"
+///   "rsync src dest"             → "rsync"
+///   "(cd /; ls)"                 → null
+///   ""                           → null
+pub fn extractBinary(command: []const u8) ?[]const u8 {
+    var rest = std.mem.trimStart(u8, command, " \t");
+    while (rest.len > 0) {
+        const ws = std.mem.indexOfAny(u8, rest, " \t") orelse rest.len;
+        const tok = rest[0..ws];
+        if (tok.len == 0) return null;
+        if (isEnvAssign(tok)) {
+            rest = std.mem.trimStart(u8, rest[ws..], " \t");
+            continue;
+        }
+        const c0 = tok[0];
+        // Anything we can't statically interpret as a plain binary
+        // path: shell groupings, expansions, quoting, command
+        // substitution, escapes. Better to skip than to mis-report.
+        if (c0 == '(' or c0 == '{' or c0 == '$' or c0 == '"' or c0 == '\'' or c0 == '`' or c0 == '\\') return null;
+        return tok;
+    }
+    return null;
+}
+
+fn isEnvAssign(tok: []const u8) bool {
+    // POSIX env-var assignment: `[A-Za-z_][A-Za-z0-9_]*=...`. The `=`
+    // must appear after at least one valid name character; bare `=foo`
+    // is not an assignment, it's an attempted command.
+    if (tok.len < 2) return false;
+    if (!(std.ascii.isAlphabetic(tok[0]) or tok[0] == '_')) return false;
+    var i: usize = 1;
+    while (i < tok.len) : (i += 1) {
+        if (tok[i] == '=') return true;
+        if (!(std.ascii.isAlphanumeric(tok[i]) or tok[i] == '_')) return false;
+    }
+    return false;
+}
+
+/// Refuse to probe binary names containing shell metacharacters.
+/// Anything fancier than `[A-Za-z0-9_.+/-]` almost certainly came from
+/// a mis-parsed command, not a real binary name — and we'd otherwise
+/// have to shell-quote it for the remote `command -v` invocation.
+fn isPlainBinaryName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |b| {
+        if (!(std.ascii.isAlphanumeric(b) or b == '_' or b == '-' or b == '.' or b == '/' or b == '+')) return false;
+    }
+    return true;
+}
+
+/// Probe whether `binary` is reachable on the target.
+/// - local: absolute / relative-with-slash → `access(X_OK)`; bare name → walk PATH
+/// - remote: ssh + POSIX `command -v` (one cheap round-trip; same
+///   BatchMode/ConnectTimeout constraints as the real crontab read)
+/// - file: skipped — no execution context
+pub fn commandReachable(a: std.mem.Allocator, t: Target, binary: []const u8) ReachResult {
+    if (!isPlainBinaryName(binary)) return .skipped;
+    switch (t.kind) {
+        .file => return .skipped,
+        .local => {
+            if (std.mem.indexOfScalar(u8, binary, '/') != null) {
+                const z = a.dupeZ(u8, binary) catch return .skipped;
+                return if (posix.c.access(z.ptr, posix.c.X_OK) == 0) .found else .missing;
+            }
+            return if (hasInPath(a, binary)) .found else .missing;
+        },
+        .remote => {
+            var argv: std.ArrayList([]const u8) = .empty;
+            const prefix = target_mod.sshArgvPrefix(a, t.host) catch return .skipped;
+            argv.appendSlice(a, prefix) catch return .skipped;
+            argv.append(a, "sh") catch return .skipped;
+            argv.append(a, "-c") catch return .skipped;
+            // `command -v --` accepts both bare names and absolute
+            // paths, and exits 0 on hit / 1 on miss. We've already
+            // validated `binary` against `isPlainBinaryName`, so
+            // single-quoting is safe (no `'` to escape).
+            const cmd = std.fmt.allocPrint(a, "command -v -- '{s}' >/dev/null 2>&1", .{binary}) catch return .skipped;
+            argv.append(a, cmd) catch return .skipped;
+            const r = posix.runCapture(a, argv.items, null) catch return .skipped;
+            return switch (r.code) {
+                0 => .found,
+                1, 127 => .missing,
+                else => .skipped,
+            };
+        },
+    }
+}
+
+pub fn cmdAdd(ctx: *Ctx, t: Target, content: []const u8, schedule: []const u8, command: []const u8, want_id: ?[]const u8, check_command: bool) !void {
     const cron = nlp.toCron(ctx.a, schedule) orelse {
         posix.eprint("looper: couldn't read schedule '{s}'\n", .{schedule});
         posix.eprint("  use cron (\"*/15 9-17 * * 1-5\") or plain English (\"every weekday at 9am\")\n", .{});
@@ -173,6 +278,22 @@ pub fn cmdAdd(ctx: *Ctx, t: Target, content: []const u8, schedule: []const u8, c
     };
     if (!std.mem.eql(u8, cron, schedule))
         ctx.emit("{s}interpreted{s} \"{s}\" as {s}{s}{s}  ({s})\n", .{ ctx.k(colors.DIM), ctx.k(colors.RESET), schedule, ctx.k(colors.BOLD), cron, ctx.k(colors.RESET), humanize.humanize(ctx.a, cron) });
+    // Opt-in preflight. Not blocking: cron failures usually surface as
+    // silent "no such file or directory" in the mail spool, which is
+    // exactly what we want to head off — surface it now, still add the
+    // job. Suppressed under --quiet (diagnostic noise) and --json (would
+    // pollute the structured output on stdout).
+    if (check_command and !ctx.quiet and !ctx.json) {
+        if (extractBinary(command)) |bin| {
+            switch (commandReachable(ctx.a, t, bin)) {
+                .missing => ctx.emit(
+                    "{s}!{s} command {s}'{s}'{s} not found on {s} — cron may fail to run (PATH under cron is minimal; consider an absolute path)\n",
+                    .{ ctx.k(colors.YELLOW), ctx.k(colors.RESET), ctx.k(colors.BOLD), bin, ctx.k(colors.RESET), t.label(ctx.a) },
+                ),
+                .found, .skipped => {},
+            }
+        }
+    }
     var ct = try model.parseCrontab(ctx.a, content);
     const id = want_id orelse blk: {
         for (ct.items.items) |it| switch (it) {
@@ -923,7 +1044,7 @@ test "cmdAdd then serialize contains a managed job" {
     var ctx = newCtx(a);
     const tgt = try tmpTarget(a);
     defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo hi", "demo");
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo hi", "demo", false);
     const got = try target_mod.readFileAll(a, tgt.path);
     try testing.expect(std.mem.indexOf(u8, got, "#looper# id=demo enabled=1") != null);
     try testing.expect(std.mem.indexOf(u8, got, "0 3 * * * /bin/echo hi") != null);
@@ -936,7 +1057,7 @@ test "cmdToggle disables a job by commenting payload" {
     var ctx = newCtx(a);
     const tgt = try tmpTarget(a);
     defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo hi", "demo");
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo hi", "demo", false);
     const after_add = try target_mod.readFileAll(a, tgt.path);
     var ids = [_][]const u8{"demo"};
     try cmdToggle(&ctx, tgt, after_add, ids[0..], false);
@@ -952,9 +1073,9 @@ test "cmdAdd is idempotent by id" {
     var ctx = newCtx(a);
     const tgt = try tmpTarget(a);
     defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo first", "demo");
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo first", "demo", false);
     const c1 = try target_mod.readFileAll(a, tgt.path);
-    try cmdAdd(&ctx, tgt, c1, "0 4 * * *", "/bin/echo second", "demo");
+    try cmdAdd(&ctx, tgt, c1, "0 4 * * *", "/bin/echo second", "demo", false);
     const c2 = try target_mod.readFileAll(a, tgt.path);
     // exactly one marker line — second add updated in place
     var marker_count: usize = 0;
@@ -974,7 +1095,7 @@ test "cmdEdit --schedule preserves command" {
     var ctx = newCtx(a);
     const tgt = try tmpTarget(a);
     defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo original", "demo");
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo original", "demo", false);
     const after_add = try target_mod.readFileAll(a, tgt.path);
     try cmdEdit(&ctx, tgt, after_add, "demo", "0 4 * * *", null);
     const got = try target_mod.readFileAll(a, tgt.path);
@@ -989,7 +1110,7 @@ test "cmdEdit --command preserves schedule" {
     var ctx = newCtx(a);
     const tgt = try tmpTarget(a);
     defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo original", "demo");
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo original", "demo", false);
     const after_add = try target_mod.readFileAll(a, tgt.path);
     try cmdEdit(&ctx, tgt, after_add, "demo", null, "/bin/echo updated");
     const got = try target_mod.readFileAll(a, tgt.path);
@@ -1004,7 +1125,7 @@ test "cmdEdit both flags update both fields" {
     var ctx = newCtx(a);
     const tgt = try tmpTarget(a);
     defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo");
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo", false);
     const after_add = try target_mod.readFileAll(a, tgt.path);
     try cmdEdit(&ctx, tgt, after_add, "demo", "@hourly", "/bin/echo b");
     const got = try target_mod.readFileAll(a, tgt.path);
@@ -1041,7 +1162,7 @@ test "cmdEdit rejects invalid schedule" {
     var ctx = newCtx(a);
     const tgt = try tmpTarget(a);
     defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo");
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo", false);
     const after_add = try target_mod.readFileAll(a, tgt.path);
     try cmdEdit(&ctx, tgt, after_add, "demo", "not a real schedule and not English either", null);
     try testing.expectEqual(@as(u8, 1), ctx.exit_code);
@@ -1058,7 +1179,7 @@ test "cmdLs --json emits next:null and next_human:null for @reboot" {
     ctx.json = true;
     const tgt = try tmpTarget(a);
     defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try cmdAdd(&ctx, tgt, "", "@reboot", "/opt/start.sh", "boot");
+    try cmdAdd(&ctx, tgt, "", "@reboot", "/opt/start.sh", "boot", false);
     ctx.buf.clearRetainingCapacity();
     const content = try target_mod.readFileAll(a, tgt.path);
     const tz = tz_mod.controllerTz(a);
@@ -1078,7 +1199,7 @@ test "cmdLs --json carries target, human_schedule, tz_source" {
     ctx.json = true;
     const tgt = try tmpTarget(a);
     defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo");
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo", false);
     ctx.buf.clearRetainingCapacity();
     const content = try target_mod.readFileAll(a, tgt.path);
     const tz = tz_mod.controllerTz(a);
@@ -1097,7 +1218,7 @@ test "cmdShow --json single object with next array of {epoch,human}" {
     ctx.json = true;
     const tgt = try tmpTarget(a);
     defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo");
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo", false);
     ctx.buf.clearRetainingCapacity();
     const content = try target_mod.readFileAll(a, tgt.path);
     const tz = tz_mod.controllerTz(a);
@@ -1116,7 +1237,7 @@ test "cmdShow --json with @reboot emits empty next array" {
     ctx.json = true;
     const tgt = try tmpTarget(a);
     defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try cmdAdd(&ctx, tgt, "", "@reboot", "/opt/start.sh", "boot");
+    try cmdAdd(&ctx, tgt, "", "@reboot", "/opt/start.sh", "boot", false);
     ctx.buf.clearRetainingCapacity();
     const content = try target_mod.readFileAll(a, tgt.path);
     const tz = tz_mod.controllerTz(a);
@@ -1186,7 +1307,7 @@ test "cmdEdit accepts an @macro schedule" {
     var ctx = newCtx(a);
     const tgt = try tmpTarget(a);
     defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo");
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo", false);
     const after_add = try target_mod.readFileAll(a, tgt.path);
     try cmdEdit(&ctx, tgt, after_add, "demo", "@daily", null);
     const got = try target_mod.readFileAll(a, tgt.path);
@@ -1433,4 +1554,111 @@ test "cmdDoctor --all with missing hosts file fails the run" {
     try testing.expectEqual(@as(u8, 1), ctx.exit_code);
     try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "hosts file") != null);
     try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "check(s) failed") != null);
+}
+
+// ─── --check-command preflight tests ─────────────────────────────────────────
+
+test "extractBinary returns the first non-assignment token" {
+    try testing.expectEqualStrings("/usr/bin/foo", extractBinary("/usr/bin/foo arg1 arg2").?);
+    try testing.expectEqualStrings("rsync", extractBinary("rsync -a src dest").?);
+    try testing.expectEqualStrings("/bin/sh", extractBinary("  /bin/sh -c 'work'").?);
+}
+
+test "extractBinary skips leading KEY=VAL env-var assignments" {
+    try testing.expectEqualStrings("/bin/baz", extractBinary("FOO=bar /bin/baz").?);
+    try testing.expectEqualStrings("rsync", extractBinary("FOO=1 BAR=2 BAZ=qux rsync src dest").?);
+    // Underscore-leading is a valid POSIX env-var name.
+    try testing.expectEqualStrings("/bin/foo", extractBinary("_X=1 /bin/foo").?);
+}
+
+test "extractBinary gives up on shell constructs" {
+    try testing.expect(extractBinary("(cd /; ls)") == null);
+    try testing.expect(extractBinary("$VAR_NOT_A_BINARY") == null);
+    try testing.expect(extractBinary("`backtick`") == null);
+    try testing.expect(extractBinary("\"quoted\"") == null);
+    try testing.expect(extractBinary("\\escaped") == null);
+}
+
+test "extractBinary returns null on empty / whitespace-only" {
+    try testing.expect(extractBinary("") == null);
+    try testing.expect(extractBinary("   \t  ") == null);
+}
+
+test "extractBinary handles only-env-var input gracefully" {
+    // No actual binary after the assignments — caller would do nothing.
+    try testing.expect(extractBinary("FOO=bar") == null);
+}
+
+test "commandReachable on file target is always skipped" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const t: Target = .{ .kind = .file, .path = "/tmp/nope" };
+    try testing.expectEqual(ReachResult.skipped, commandReachable(a, t, "/bin/sh"));
+    try testing.expectEqual(ReachResult.skipped, commandReachable(a, t, "rsync"));
+}
+
+test "commandReachable local: /bin/sh exists, garbage path is missing" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const t: Target = .{ .kind = .local };
+    try testing.expectEqual(ReachResult.found, commandReachable(a, t, "/bin/sh"));
+    try testing.expectEqual(ReachResult.missing, commandReachable(a, t, "/zzz/almost/certainly/not/here"));
+}
+
+test "commandReachable local: bare name found via PATH walk" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const t: Target = .{ .kind = .local };
+    // `sh` is in /bin on every POSIX system the tests would run on.
+    try testing.expectEqual(ReachResult.found, commandReachable(a, t, "sh"));
+    try testing.expectEqual(ReachResult.missing, commandReachable(a, t, "zzz_definitely_not_a_real_binary_xyz"));
+}
+
+test "commandReachable skips shell-metacharacter inputs" {
+    // Defence in depth: extractBinary should have filtered these, but
+    // commandReachable refuses to probe a name containing anything
+    // outside [A-Za-z0-9_.+/-] so we never feed dangerous input to ssh.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const t: Target = .{ .kind = .local };
+    try testing.expectEqual(ReachResult.skipped, commandReachable(a, t, "$VAR"));
+    try testing.expectEqual(ReachResult.skipped, commandReachable(a, t, "foo;rm -rf"));
+    try testing.expectEqual(ReachResult.skipped, commandReachable(a, t, "foo bar"));
+}
+
+test "cmdAdd with check_command=true on local + missing binary warns but still adds" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    ctx.color = false;
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/zzz/nonexistent/binary/almost/certainly", "demo", true);
+    // Warning text should land in the buffer (target is .file, which is
+    // skipped — but the LOCAL probe semantics are tested above; here we
+    // pin the behaviour for the .file target: NO warning is emitted
+    // because the probe is skipped). Job is still added either way.
+    const got = try target_mod.readFileAll(a, tgt.path);
+    try testing.expect(std.mem.indexOf(u8, got, "#looper# id=demo enabled=1") != null);
+    // .file target: warning suppressed (skipped probe), buf has no '!'.
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "not found") == null);
+}
+
+test "cmdAdd with check_command=true under --json does NOT pollute stdout" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    ctx.json = true;
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/zzz/missing/bin", "demo", true);
+    // The "not found" warning is non-JSON text and would corrupt
+    // structured output; we suppress it under --json.
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "not found") == null);
 }

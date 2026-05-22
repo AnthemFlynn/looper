@@ -155,7 +155,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                     ctx.fail(1);
                     break;
                 }
-                try cmds.cmdAdd(&ctx, t, content, rest[0], rest[1], parsed.want_id);
+                try cmds.cmdAdd(&ctx, t, content, rest[0], rest[1], parsed.want_id, parsed.check_command);
             },
             .edit => {
                 if (rest.len < 1) {
