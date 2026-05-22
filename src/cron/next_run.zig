@@ -60,3 +60,52 @@ pub fn nextRun(s: Schedule, from: i64) ?i64 {
     }
     return null;
 }
+
+const testing = std.testing;
+
+test "nextRun @reboot returns null" {
+    const s = try sched.parseSchedule("@reboot");
+    try testing.expectEqual(@as(?i64, null), nextRun(s, 0));
+}
+
+test "nextRun every-minute advances exactly 60s" {
+    const s = try sched.parseSchedule("* * * * *");
+    // Pick an epoch on the minute boundary to make the math obvious.
+    const from: i64 = 1_700_000_000; // arbitrary fixed time
+    const aligned = from - @mod(from, 60);
+    const nr = nextRun(s, aligned).?;
+    try testing.expectEqual(aligned + 60, nr);
+}
+
+test "nextRun zero-minute hourly advances at most 60 minutes" {
+    const s = try sched.parseSchedule("0 * * * *");
+    const from: i64 = 1_700_000_000;
+    const nr = nextRun(s, from).?;
+    const diff = nr - from;
+    try testing.expect(diff > 0 and diff <= 60 * 60);
+}
+
+test "nextRun DOM/DOW OR-rule (cross-check via matchesDay)" {
+    // Sanity: when both DOM and DOW are constrained, any next-run we get back
+    // must satisfy at least one of them.
+    const s = try sched.parseSchedule("0 0 13 * 5");
+    const from: i64 = 1_700_000_000;
+    const nr = nextRun(s, from).?;
+    const tm = epochToTm(nr);
+    const mday: u32 = @intCast(tm.tm_mday);
+    const wday: u32 = @intCast(tm.tm_wday);
+    try testing.expect(mday == 13 or wday == 5);
+}
+
+test "nextRun produces increasing sequence" {
+    const s = try sched.parseSchedule("0 9 * * *");
+    var from: i64 = 1_700_000_000;
+    var last: i64 = 0;
+    var i: usize = 0;
+    while (i < 5) : (i += 1) {
+        const nr = nextRun(s, from).?;
+        try testing.expect(nr > last);
+        last = nr;
+        from = nr;
+    }
+}

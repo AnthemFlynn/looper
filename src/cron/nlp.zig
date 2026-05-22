@@ -252,3 +252,73 @@ pub fn toCron(a: std.mem.Allocator, input: []const u8) ?[]const u8 {
     _ = sched.parseSchedule(input) catch return nlpToCron(a, input);
     return input;
 }
+
+const testing = std.testing;
+
+test "nlpToCron single-word shorthands" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings("0 * * * *", nlpToCron(a, "hourly").?);
+    try testing.expectEqualStrings("0 0 * * *", nlpToCron(a, "daily").?);
+    try testing.expectEqualStrings("0 0 * * 0", nlpToCron(a, "weekly").?);
+    try testing.expectEqualStrings("0 0 1 * *", nlpToCron(a, "monthly").?);
+    try testing.expectEqualStrings("0 0 1 1 *", nlpToCron(a, "yearly").?);
+}
+
+test "nlpToCron reboot phrases" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings("@reboot", nlpToCron(a, "at boot").?);
+    try testing.expectEqualStrings("@reboot", nlpToCron(a, "on startup").?);
+}
+
+test "nlpToCron weekday at 9am" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings("0 9 * * 1-5", nlpToCron(arena.allocator(), "every weekday at 9am").?);
+}
+
+test "nlpToCron every 15 min from 9am to 5pm on weekdays" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings("*/15 9-17 * * 1-5", nlpToCron(arena.allocator(), "every 15 min from 9am to 5pm on weekdays").?);
+}
+
+test "nlpToCron at noon on sundays" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings("0 12 * * 0", nlpToCron(arena.allocator(), "at noon on sundays").?);
+}
+
+test "nlpToCron ordinal day-of-month" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings("0 0 1 * *", nlpToCron(arena.allocator(), "on the 1st").?);
+}
+
+test "nlpToCron monday and thursday at 5pm" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings("0 17 * * 1,4", nlpToCron(arena.allocator(), "every monday and thursday at 5pm").?);
+}
+
+test "nlpToCron unparseable returns null" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqual(@as(?[]const u8, null), nlpToCron(arena.allocator(), "frobnicate the widget"));
+}
+
+test "toCron passes valid cron through unchanged" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings("*/15 9-17 * * 1-5", toCron(a, "*/15 9-17 * * 1-5").?);
+}
+
+test "toCron compiles English when not valid cron" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings("0 9 * * 1-5", toCron(arena.allocator(), "every weekday at 9am").?);
+}

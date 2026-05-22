@@ -167,3 +167,161 @@ pub fn serialize(a: std.mem.Allocator, ct: *Crontab) ![]u8 {
     };
     return out.toOwnedSlice(a);
 }
+
+const testing = std.testing;
+
+test "splitScheduleCommand standard 5-field" {
+    const sc = splitScheduleCommand("0 3 * * * /usr/local/bin/backup.sh").?;
+    try testing.expectEqualStrings("0 3 * * *", sc.sched);
+    try testing.expectEqualStrings("/usr/local/bin/backup.sh", sc.cmd);
+}
+
+test "splitScheduleCommand @macro" {
+    const sc = splitScheduleCommand("@reboot /opt/start.sh").?;
+    try testing.expectEqualStrings("@reboot", sc.sched);
+    try testing.expectEqualStrings("/opt/start.sh", sc.cmd);
+}
+
+test "splitScheduleCommand fewer than 5 fields rejected" {
+    try testing.expectEqual(@as(?SC, null), splitScheduleCommand("0 3 * *"));
+}
+
+test "splitScheduleCommand empty rejected" {
+    try testing.expectEqual(@as(?SC, null), splitScheduleCommand(""));
+    try testing.expectEqual(@as(?SC, null), splitScheduleCommand("   "));
+}
+
+test "isEnvAssignment identifies PATH=/usr/bin" {
+    try testing.expect(isEnvAssignment("PATH=/usr/bin"));
+    try testing.expect(isEnvAssignment("MAILTO=ops@example.com"));
+    try testing.expect(isEnvAssignment("_PRIVATE=42"));
+}
+
+test "isEnvAssignment rejects cron lines" {
+    try testing.expect(!isEnvAssignment("0 3 * * * cmd"));
+    try testing.expect(!isEnvAssignment("@reboot cmd"));
+    try testing.expect(!isEnvAssignment(""));
+    try testing.expect(!isEnvAssignment("=value"));
+}
+
+test "parseMarker valid" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const m = parseMarker(arena.allocator(), "#looper# id=foo enabled=1").?;
+    try testing.expectEqualStrings("foo", m.id);
+    try testing.expect(m.enabled);
+}
+
+test "parseMarker enabled=0" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const m = parseMarker(arena.allocator(), "#looper# id=bar enabled=0").?;
+    try testing.expectEqualStrings("bar", m.id);
+    try testing.expect(!m.enabled);
+}
+
+test "parseMarker no id is invalid" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqual(@as(?Marker, null), parseMarker(arena.allocator(), "#looper# enabled=1"));
+}
+
+test "parseCrontab preserves foreign lines and env" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const input =
+        \\PATH=/usr/local/bin:/usr/bin
+        \\# a comment
+        \\0 6 * * 1 /opt/foreign.sh
+        \\
+    ;
+    const ct = try parseCrontab(a, input);
+    var foreigners: usize = 0;
+    var raws: usize = 0;
+    for (ct.items.items) |it| switch (it) {
+        .job => |j| if (j.foreign) {
+            foreigners += 1;
+        },
+        .raw => raws += 1,
+    };
+    try testing.expectEqual(@as(usize, 1), foreigners);
+    try testing.expectEqual(@as(usize, 2), raws); // PATH= and the comment line
+}
+
+test "parseCrontab marker + payload becomes managed job" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const input =
+        \\#looper# id=db-backup enabled=1
+        \\0 3 * * * /usr/local/bin/backup.sh
+        \\
+    ;
+    const ct = try parseCrontab(a, input);
+    try testing.expectEqual(@as(usize, 1), ct.items.items.len);
+    switch (ct.items.items[0]) {
+        .job => |j| {
+            try testing.expectEqualStrings("db-backup", j.id);
+            try testing.expect(j.enabled);
+            try testing.expect(!j.foreign);
+            try testing.expectEqualStrings("0 3 * * *", j.schedule);
+            try testing.expectEqualStrings("/usr/local/bin/backup.sh", j.command);
+        },
+        else => return error.UnexpectedItem,
+    }
+}
+
+test "parseCrontab disabled job round-trips" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const input =
+        \\#looper# id=paused enabled=0
+        \\# 0 4 * * * /opt/maint.sh
+        \\
+    ;
+    const ct = try parseCrontab(a, input);
+    switch (ct.items.items[0]) {
+        .job => |j| {
+            try testing.expect(!j.enabled);
+            try testing.expectEqualStrings("0 4 * * *", j.schedule);
+            try testing.expectEqualStrings("/opt/maint.sh", j.command);
+        },
+        else => return error.UnexpectedItem,
+    }
+}
+
+test "serialize roundtrip preserves byte content" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const input =
+        \\PATH=/usr/local/bin
+        \\#looper# id=db-backup enabled=1
+        \\0 3 * * * /usr/local/bin/backup.sh
+        \\#looper# id=paused enabled=0
+        \\# 0 4 * * * /opt/maint.sh
+        \\@daily /usr/local/bin/foreign.sh
+        \\
+    ;
+    var ct = try parseCrontab(a, input);
+    const out = try serialize(a, &ct);
+    try testing.expectEqualStrings(input, out);
+}
+
+test "Crontab findIndex finds managed by id, skips foreign" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const input =
+        \\#looper# id=foo enabled=1
+        \\0 3 * * * cmd
+        \\@daily other
+        \\
+    ;
+    const ct = try parseCrontab(a, input);
+    try testing.expectEqual(@as(?usize, 0), ct.findIndex("foo"));
+    try testing.expectEqual(@as(?usize, null), ct.findIndex("nope"));
+    try testing.expectEqual(@as(?usize, 1), ct.findForeign(1));
+}

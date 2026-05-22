@@ -112,3 +112,49 @@ pub fn fmtWhen(a: std.mem.Allocator, ts: i64) []const u8 {
         relTime(a, ts - now),
     }) catch "";
 }
+
+const testing = std.testing;
+
+test "humanize @reboot" {
+    try testing.expectEqualStrings("at boot", humanize(std.testing.allocator, "@reboot"));
+}
+
+test "humanize @daily and @midnight equivalent" {
+    try testing.expectEqualStrings("every day at midnight", humanize(std.testing.allocator, "@daily"));
+    try testing.expectEqualStrings("every day at midnight", humanize(std.testing.allocator, "@midnight"));
+}
+
+test "humanize every-N-minutes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const out = humanize(arena.allocator(), "*/5 * * * *");
+    try testing.expect(std.mem.indexOf(u8, out, "every 5 minutes") != null);
+}
+
+test "humanize fixed time formats as HH:MM" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const out = humanize(arena.allocator(), "0 9 * * 1-5");
+    try testing.expect(std.mem.indexOf(u8, out, "09:00") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Mon") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Fri") != null);
+}
+
+test "humanize named months render" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const out = humanize(arena.allocator(), "0 0 1 1 *");
+    try testing.expect(std.mem.indexOf(u8, out, "Jan") != null);
+}
+
+test "relTime under one minute" {
+    try testing.expectEqualStrings("now", relTime(std.testing.allocator, 30));
+    try testing.expectEqualStrings("now", relTime(std.testing.allocator, -30));
+}
+
+test "relTime hours format" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const out = relTime(arena.allocator(), 3 * 3600 + 30 * 60);
+    try testing.expectEqualStrings("in 3h 30m", out);
+}

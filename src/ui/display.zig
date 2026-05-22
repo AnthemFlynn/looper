@@ -69,3 +69,43 @@ pub fn confirm(ctx: *ctx_mod.Ctx, comptime fmt: []const u8, args: anytype) bool 
     if (n <= 0) return false;
     return b[0] == 'y' or b[0] == 'Y';
 }
+
+const testing = std.testing;
+
+test "slugFromCommand strips path and lowercases" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings("python3", slugFromCommand(arena.allocator(), "/usr/bin/python3 -m foo"));
+    try testing.expectEqualStrings("backup", slugFromCommand(arena.allocator(), "/usr/local/bin/Backup --db"));
+}
+
+test "slugFromCommand empty/non-alphanum fallback" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings("job", slugFromCommand(arena.allocator(), ""));
+}
+
+test "slugUnique appends -2 on collision" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ct = @import("../crontab/model.zig").Crontab{};
+    try ct.items.append(a, .{ .job = .{ .id = "backup", .enabled = true, .schedule = "0 3 * * *", .command = "x" } });
+    try testing.expectEqualStrings("backup-2", slugUnique(a, &ct, "/usr/local/bin/backup --db"));
+}
+
+test "padTo pads short strings; passes long through" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings("ab   ", padTo(arena.allocator(), "ab", 5));
+    try testing.expectEqualStrings("hello", padTo(arena.allocator(), "hello", 3));
+}
+
+test "jsonEsc escapes the four currently-handled chars" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings("a\\\"b", jsonEsc(arena.allocator(), "a\"b"));
+    try testing.expectEqualStrings("a\\\\b", jsonEsc(arena.allocator(), "a\\b"));
+    try testing.expectEqualStrings("a\\nb", jsonEsc(arena.allocator(), "a\nb"));
+    try testing.expectEqualStrings("a\\tb", jsonEsc(arena.allocator(), "a\tb"));
+}

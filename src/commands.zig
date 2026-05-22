@@ -317,3 +317,107 @@ pub fn cmdImport(ctx: *Ctx, t: Target, content: []const u8) !void {
     const verb = try std.fmt.allocPrint(ctx.a, "imported {d} job(s)", .{n});
     try applyMutation(ctx, t, content, new_content, verb);
 }
+
+const testing = std.testing;
+
+/// Make a unique temp-file target inside the test arena.
+fn tmpTarget(a: std.mem.Allocator) !Target {
+    const path = try std.fmt.allocPrint(a, "/tmp/looper-test-{x}.crontab", .{posix.nowEpoch()});
+    return Target{ .kind = .file, .path = path };
+}
+
+fn newCtx(a: std.mem.Allocator) Ctx {
+    return Ctx{ .a = a, .color = false, .yes = true };
+}
+
+test "applyMutation no-change short-circuits" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    try applyMutation(&ctx, tgt, "same\n", "same\n", "noop");
+    // Nothing should have been written; no file created either.
+    const fdz = try a.dupeZ(u8, tgt.path);
+    const fd = posix.c.open(fdz.ptr, posix.c.O_RDONLY);
+    try testing.expect(fd < 0); // file does not exist
+}
+
+test "applyMutation writes new content + creates a backup" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try applyMutation(&ctx, tgt, "old\n", "new\n", "test write");
+    const got = try target_mod.readFileAll(a, tgt.path);
+    try testing.expectEqualStrings("new\n", got);
+}
+
+test "applyMutation --dry-run does not write" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    ctx.dry_run = true;
+    const tgt = try tmpTarget(a);
+    try applyMutation(&ctx, tgt, "old\n", "new\n", "dry-test");
+    const fdz = try a.dupeZ(u8, tgt.path);
+    const fd = posix.c.open(fdz.ptr, posix.c.O_RDONLY);
+    try testing.expect(fd < 0); // never created
+    // and the diff was emitted to ctx.buf
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "+ new") != null);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "- old") != null);
+}
+
+test "cmdAdd then serialize contains a managed job" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo hi", "demo");
+    const got = try target_mod.readFileAll(a, tgt.path);
+    try testing.expect(std.mem.indexOf(u8, got, "#looper# id=demo enabled=1") != null);
+    try testing.expect(std.mem.indexOf(u8, got, "0 3 * * * /bin/echo hi") != null);
+}
+
+test "cmdToggle disables a job by commenting payload" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo hi", "demo");
+    const after_add = try target_mod.readFileAll(a, tgt.path);
+    var ids = [_][]const u8{"demo"};
+    try cmdToggle(&ctx, tgt, after_add, ids[0..], false);
+    const got = try target_mod.readFileAll(a, tgt.path);
+    try testing.expect(std.mem.indexOf(u8, got, "enabled=0") != null);
+    try testing.expect(std.mem.indexOf(u8, got, "# 0 3 * * * /bin/echo hi") != null);
+}
+
+test "cmdAdd is idempotent by id" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo first", "demo");
+    const c1 = try target_mod.readFileAll(a, tgt.path);
+    try cmdAdd(&ctx, tgt, c1, "0 4 * * *", "/bin/echo second", "demo");
+    const c2 = try target_mod.readFileAll(a, tgt.path);
+    // exactly one marker line — second add updated in place
+    var marker_count: usize = 0;
+    var it = std.mem.splitScalar(u8, c2, '\n');
+    while (it.next()) |line| if (std.mem.startsWith(u8, line, "#looper#")) {
+        marker_count += 1;
+    };
+    try testing.expectEqual(@as(usize, 1), marker_count);
+    try testing.expect(std.mem.indexOf(u8, c2, "0 4 * * * /bin/echo second") != null);
+    try testing.expect(std.mem.indexOf(u8, c2, "first") == null);
+}

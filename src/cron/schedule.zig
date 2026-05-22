@@ -124,3 +124,94 @@ pub fn parseSchedule(expr_in: []const u8) ParseError!Schedule {
     s.dow = @intCast(try parseField(4, fields[4], &s.dow_star));
     return s;
 }
+
+const testing = std.testing;
+
+test "parseSchedule @hourly expands to 0 * * * *" {
+    const s = try parseSchedule("@hourly");
+    try testing.expectEqual(@as(u64, 1), s.min); // bit 0
+    try testing.expect(s.hour != 0);
+}
+
+test "parseSchedule @daily expands" {
+    const s = try parseSchedule("@daily");
+    try testing.expectEqual(@as(u64, 1), s.min);
+    try testing.expectEqual(@as(u32, 1), s.hour);
+}
+
+test "parseSchedule @yearly == @annually" {
+    const y = try parseSchedule("@yearly");
+    const a = try parseSchedule("@annually");
+    try testing.expectEqual(y.min, a.min);
+    try testing.expectEqual(y.hour, a.hour);
+    try testing.expectEqual(y.dom, a.dom);
+    try testing.expectEqual(y.mon, a.mon);
+}
+
+test "parseSchedule @reboot sets reboot flag" {
+    const s = try parseSchedule("@reboot");
+    try testing.expect(s.reboot);
+}
+
+test "parseSchedule bad macro rejected" {
+    try testing.expectError(ParseError.BadMacro, parseSchedule("@frobnitz"));
+}
+
+test "parseSchedule named months case-insensitive" {
+    const s = try parseSchedule("0 0 1 JAN *");
+    try testing.expectEqual(@as(u16, 1 << 1), s.mon);
+    const s2 = try parseSchedule("0 0 1 Dec *");
+    try testing.expectEqual(@as(u16, 1 << 12), s2.mon);
+}
+
+test "parseSchedule named DOWs mon-fri" {
+    const s = try parseSchedule("0 0 * * mon-fri");
+    // bits 1,2,3,4,5 should be set; 0 and 6 clear
+    try testing.expectEqual(@as(u8, 0b00111110), s.dow);
+}
+
+test "parseSchedule DOW 7 normalizes to 0" {
+    const s = try parseSchedule("0 0 * * 7");
+    try testing.expectEqual(@as(u8, 1), s.dow); // bit 0
+}
+
+test "parseSchedule step with range 0-30/5" {
+    const s = try parseSchedule("0-30/5 * * * *");
+    // bits 0, 5, 10, 15, 20, 25, 30 should be set
+    const expected: u64 = (1 << 0) | (1 << 5) | (1 << 10) | (1 << 15) | (1 << 20) | (1 << 25) | (1 << 30);
+    try testing.expectEqual(expected, s.min);
+}
+
+test "parseSchedule out-of-range minute rejected" {
+    try testing.expectError(ParseError.OutOfRange, parseSchedule("60 * * * *"));
+}
+
+test "parseSchedule wrong field count rejected" {
+    try testing.expectError(ParseError.WrongFieldCount, parseSchedule("* * * *"));
+    try testing.expectError(ParseError.WrongFieldCount, parseSchedule("* * * * * *"));
+}
+
+test "parseSchedule comma list dedupes" {
+    const s = try parseSchedule("0,0,30 * * * *");
+    try testing.expectEqual(@as(u64, (1 << 0) | (1 << 30)), s.min);
+}
+
+test "parseSchedule star sets dom_star and dow_star" {
+    const s = try parseSchedule("* * * * *");
+    try testing.expect(s.dom_star);
+    try testing.expect(s.dow_star);
+}
+
+test "matchesDay Vixie OR-rule: both constrained fires on either" {
+    var s = try parseSchedule("0 0 13 * 5"); // 13th OR Friday
+    _ = &s;
+    try testing.expect(s.matchesDay(13, 2)); // 13th, Tue → match (DOM)
+    try testing.expect(s.matchesDay(7, 5));  // 7th, Fri → match (DOW)
+    try testing.expect(!s.matchesDay(7, 2)); // 7th, Tue → no match
+}
+
+test "matchesDay both star always matches" {
+    const s = try parseSchedule("* * * * *");
+    try testing.expect(s.matchesDay(1, 0));
+    try testing.expect(s.matchesDay(31, 6));
+}

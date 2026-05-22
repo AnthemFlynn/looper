@@ -42,3 +42,36 @@ pub fn printDiff(ctx: *ctx_mod.Ctx, old: []const u8, new: []const u8) void {
     while (x < m) : (x += 1) ctx.emit("{s}- {s}{s}\n", .{ ctx.k(ctx_mod.RED), ol.items[x], ctx.k(ctx_mod.RESET) });
     while (y < n) : (y += 1) ctx.emit("{s}+ {s}{s}\n", .{ ctx.k(ctx_mod.GREEN), nl.items[y], ctx.k(ctx_mod.RESET) });
 }
+
+const testing = std.testing;
+
+fn runDiff(a: std.mem.Allocator, old: []const u8, new: []const u8) []const u8 {
+    var ctx = ctx_mod.Ctx{ .a = a, .color = false };
+    printDiff(&ctx, old, new);
+    return ctx.buf.toOwnedSlice(a) catch "";
+}
+
+test "printDiff identical input yields all context lines, no +/-" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const out = runDiff(arena.allocator(), "alpha\nbeta\n", "alpha\nbeta\n");
+    try testing.expect(std.mem.indexOf(u8, out, "- ") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "+ ") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "  alpha") != null);
+}
+
+test "printDiff single-line replace emits both - and +" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const out = runDiff(arena.allocator(), "alpha\nbeta\n", "alpha\ngamma\n");
+    try testing.expect(std.mem.indexOf(u8, out, "- beta") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "+ gamma") != null);
+}
+
+test "printDiff pure addition" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const out = runDiff(arena.allocator(), "alpha\n", "alpha\nbeta\n");
+    try testing.expect(std.mem.indexOf(u8, out, "+ beta") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "- ") == null);
+}
