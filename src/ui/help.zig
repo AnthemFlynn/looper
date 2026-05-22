@@ -40,6 +40,7 @@ pub fn printHelp(ctx: *ctx_mod.Ctx) void {
     ctx.emit("      --json                Machine-readable output (for ls)\n", .{});
     ctx.emit("  -q, --quiet               Print only errors\n", .{});
     ctx.emit("      --no-color            Disable color (also obeys NO_COLOR)\n", .{});
+    ctx.emit("      --no-target-tz        Skip remote TZ probe; render everything as controller-local\n", .{});
     ctx.emit("  -h, --help                Show this help\n", .{});
     ctx.emit("\n", .{});
     ctx.emit("{s}SCHEDULES{s} {s}- cron, a macro, or plain English, all stored as standard cron{s}\n", .{ B, R, D, R });

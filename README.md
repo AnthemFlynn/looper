@@ -5,15 +5,15 @@ user, across remote hosts over **ssh**, or in a plain crontab file. One job,
 done well: **manage cron jobs**. It speaks standard 5-field cron plus the
 `@macros` cron already understands; it never invents a scheduler syntax.
 
-Modular Zig 0.16 codebase under `src/` (~1100 lines total), no dependencies
+Modular Zig 0.16 codebase under `src/` (~1900 lines total), no dependencies
 beyond libc, static binaries for every box in a mixed-arch fleet.
 
 ```
 $ looper ls
-ID            SCHEDULE              NEXT RUN                   COMMAND
-db-backup     0 3 * * *             2026-05-22 03:00  in 1h 14m ● /usr/local/bin/backup.sh --db
-tidy          */15 9-17 * * mon-fri 2026-05-22 09:00  in 7h 14m ● tidy-temp
-warmup        @reboot               at boot                  ○ /opt/legacy/warmup.sh
+ID            SCHEDULE              NEXT RUN                               COMMAND
+db-backup     0 3 * * *             2026-05-22 03:00 PDT  in 1h 14m      ● /usr/local/bin/backup.sh --db
+tidy          */15 9-17 * * mon-fri 2026-05-22 09:00 PDT  in 7h 14m      ● tidy-temp
+warmup        @reboot               at boot                              ○ /opt/legacy/warmup.sh
 ```
 
 ## Why it exists
@@ -214,14 +214,54 @@ pi@media
 deploy@web1
 ```
 
+## Timezones
+
+For a cross-timezone fleet, "next run at 03:00" is meaningless without saying
+*whose* clock that is. looper resolves the target's timezone on every read and
+labels every wall-clock string accordingly.
+
+```
+$ looper -H sg-host show db-backup
+db-backup  enabled
+  schedule : 0 3 * * *
+  meaning  : at 03:00 every day
+  command  : /usr/local/bin/backup.sh
+  target   : sg-host
+  timezone : SGT (UTC+08:00, probed from target)
+  next 5   :
+    2026-05-22 03:00 SGT  in 12h 27m
+    2026-05-23 03:00 SGT  in 1d 12h
+    ...
+```
+
+**How it works.** For each remote target, the same ssh round-trip that runs
+`crontab -l` also runs `date +%z` / `date +%Z`. The result is split on a
+sentinel and parsed into the target's offset and abbreviation. **Zero extra
+ssh round-trips** — `looper --all ls` against twenty hosts is exactly as fast
+as before, and times now render in each host's own clock.
+
+When the probe fails (restricted shell, exotic `date` output, locale-translated
+`%Z`), looper falls back to the controller's timezone and tags every line
+`(controller-local)` so you're never silently misled.
+
+**Caveat: snapshot offset, not zoneinfo.** The probe gives a fixed offset
+("`SGT` is currently UTC+08:00"), not the target's full DST rules. If a target
+zone has a DST transition during the next-5 horizon shown by `show`, entries
+past the boundary will be off by an hour. The cron daemon on the target is the
+source of truth; looper only previews. Shipping a zoneinfo database would add
+~3MB to the binary and break libc-only, so the snapshot is a deliberate
+tradeoff.
+
+Use `--no-target-tz` to skip probing entirely and force controller-local
+labeling — handy for scripted consumers that want a stable rendering, or for
+targets with a deliberately broken `date` binary. `doctor` reports the probed
+TZ for each remote target so you can verify it once and forget it.
+
 ## Notes & limits
 
 - **Scope is deliberate.** looper only emits standard cron. If an expression
   isn't valid cron, it's rejected — the tool won't paper over cron's own rules.
 - **`@reboot`** is supported as a literal; there's no "next run" to compute for it.
-- **Remote next-run times** are computed in the *controlling* machine's
-  timezone. For a single-timezone homelab that's correct; across timezones,
-  read them as "controller local".
 - **Exit codes:** `0` success, `1` operational error (job not found, write
   failed, bad schedule), `2` usage error. `run` propagates the job's own exit code.
 - Honors `NO_COLOR`, `--no-color`, and non-tty output (color off automatically).
@@ -230,13 +270,19 @@ deploy@web1
 
 The codebase is organized under `src/` with three subdirectories:
 
-- `src/cron/` — schedule parser, next-run calculator, humanizer, NLP front-end
-- `src/crontab/` — file model, target backends (local/ssh/file), backup snapshots
+- `src/cron/` — schedule parser, next-run calculators (controller-zone and
+  target-zone), humanizer, NLP front-end
+- `src/crontab/` — file model, target backends (local/ssh/file), backup
+  snapshots, sentinel-split crontab+TZ reader
 - `src/ui/` — terminal display, diff renderer, help screen
 
-The schedule parser, next-run calculator (DST-correct via libc `localtime_r`/
-`mktime`), and the Vixie DOM/DOW OR-rule are covered by inline unit tests
-colocated with each module. Run them with:
+Plus `src/tz.zig` (pure TzInfo + probe parser) and `src/tz_probe.zig` (the
+ssh-side TZ probe + per-run cache).
+
+The schedule parser, both next-run calculators (DST-correct via libc
+`localtime_r`/`mktime` for controller-zone; fixed-offset via `gmtime_r`/`timegm`
+for target-zone), the Vixie DOM/DOW OR-rule, and the timezone probe parser
+are all covered by inline unit tests colocated with each module. Run them with:
 
 ```sh
 zig build test

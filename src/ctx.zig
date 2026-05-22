@@ -13,6 +13,11 @@ pub const Ctx = struct {
     dry_run: bool = false,
     yes: bool = false,
     quiet: bool = false,
+    /// Disables the per-remote-target TZ probe; everything renders as
+    /// controller-local with the explicit `(controller-local)` tag.
+    /// Useful for scripted consumers that want a stable rendering, or
+    /// when a target has a deliberately broken `date` binary.
+    no_target_tz: bool = false,
     buf: std.ArrayList(u8) = .empty,
     /// First-failure wins. Stays 0 until something fails; subsequent
     /// failures don't overwrite. `main` reads this at end-of-run.

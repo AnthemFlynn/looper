@@ -10,6 +10,7 @@ const cmds = @import("commands.zig");
 const help_mod = @import("ui/help.zig");
 const colors = @import("ui/colors.zig");
 const target_mod = @import("crontab/target.zig");
+const tz_mod = @import("tz.zig");
 
 const Cmd = enum { ls, add, rm, enable, disable, show, run, explain, import, backup, restore, doctor, version, help, unknown };
 
@@ -118,13 +119,22 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const multi = targets.len > 1;
     for (targets) |t| {
         if (multi) ctx.emit("{s}{s}=== {s} ==={s}\n", .{ ctx.k(colors.BOLD), ctx.k(colors.BLUE), t.label(a), ctx.k(colors.RESET) });
-        const content = target_mod.readCrontab(a, t) catch |e| {
+        // For remote targets, the same ssh round-trip also fetches the
+        // target's TZ (sentinel-split). Local/file return tz=null and we
+        // resolve controller TZ here.
+        const rr = target_mod.readCrontabAndTz(a, t, !ctx.no_target_tz) catch |e| {
             posix.eprint("looper: cannot read crontab on {s}: {s}\n", .{ t.label(a), @errorName(e) });
             if (e == target_mod.BackendError.Unavailable) posix.eprint("  (is 'crontab'/'ssh' installed and reachable?)\n", .{});
             continue;
         };
+        const content = rr.content;
+        var tz: tz_mod.TzInfo = rr.tz orelse tz_mod.controllerTz(a);
+        // Remote target whose probe failed → fall back to controller TZ
+        // but tag it so fmtWhenIn appends "(controller-local)" and the
+        // user is never misled.
+        if (rr.tz == null and t.kind == .remote) tz.source = .controller_fallback;
         switch (cmd) {
-            .ls => try cmds.cmdLs(&ctx, t, content),
+            .ls => try cmds.cmdLs(&ctx, t, content, tz),
             .add => {
                 if (rest.len < 2) {
                     posix.eprint("looper: add needs <schedule> <command>\n", .{});
@@ -149,7 +159,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                     ctx.fail(1);
                     break;
                 }
-                try cmds.cmdShow(&ctx, t, content, rest[0]);
+                try cmds.cmdShow(&ctx, t, content, rest[0], tz);
             },
             .run => {
                 if (rest.len < 1) {
@@ -181,6 +191,8 @@ test {
     _ = @import("ctx.zig");
     _ = @import("cli.zig");
     _ = @import("commands.zig");
+    _ = @import("tz.zig");
+    _ = @import("tz_probe.zig");
     _ = @import("cron/schedule.zig");
     _ = @import("cron/next_run.zig");
     _ = @import("cron/humanize.zig");

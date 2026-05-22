@@ -115,6 +115,36 @@ pub fn fmtWhen(a: std.mem.Allocator, ts: i64) []const u8 {
     }) catch "";
 }
 
+/// Format a UTC epoch as a wall-clock string in the supplied zone, with
+/// an unambiguous TZ tag. Computes the broken-down time by shifting the
+/// epoch by `tz.offset_secs` and using `gmtime_r` — so the result is
+/// always "wall clock in tz" regardless of the controller's `/etc/localtime`.
+///
+/// When `tz.source == .controller_fallback`, the string is suffixed with
+/// "(controller-local)" so a reader can never mistake a fallback render
+/// for the target's actual wall clock.
+pub fn fmtWhenIn(a: std.mem.Allocator, ts: i64, tz: @import("../tz.zig").TzInfo) []const u8 {
+    const posix = @import("../posix.zig");
+    const c = posix.c;
+    var shifted: c.time_t = @intCast(ts + tz.offset_secs);
+    var tm: c.struct_tm = undefined;
+    _ = c.gmtime_r(&shifted, &tm);
+    const now = posix.nowEpoch();
+    const base = std.fmt.allocPrint(a, "{d}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2} {s}  {s}", .{
+        @as(u32, @intCast(tm.tm_year + 1900)),
+        @as(u32, @intCast(tm.tm_mon + 1)),
+        @as(u32, @intCast(tm.tm_mday)),
+        @as(u32, @intCast(tm.tm_hour)),
+        @as(u32, @intCast(tm.tm_min)),
+        tz.abbrev,
+        relTime(a, ts - now),
+    }) catch "";
+    if (tz.source == .controller_fallback) {
+        return std.fmt.allocPrint(a, "{s} (controller-local)", .{base}) catch base;
+    }
+    return base;
+}
+
 const testing = std.testing;
 
 test "humanize @reboot" {
@@ -178,4 +208,36 @@ test "humanize */N minutes with single hour value" {
     const out = humanize(arena.allocator(), "*/5 9 * * *");
     try testing.expect(std.mem.indexOf(u8, out, "every 5 minutes") != null);
     try testing.expect(std.mem.indexOf(u8, out, "at hour 9") != null);
+}
+
+test "fmtWhenIn renders wall clock in the supplied zone" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const tz_mod = @import("../tz.zig");
+    // 2026-05-21 12:00:00 UTC, +08:00 (SGT) → 2026-05-21 20:00 SGT.
+    const tz: tz_mod.TzInfo = .{ .offset_secs = 8 * 3600, .abbrev = "SGT", .source = .target_probed };
+    const out = fmtWhenIn(arena.allocator(), 1_779_364_800, tz);
+    try testing.expect(std.mem.indexOf(u8, out, "2026-05-21 20:00") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "SGT") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "controller-local") == null);
+}
+
+test "fmtWhenIn appends (controller-local) when source is fallback" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const tz_mod = @import("../tz.zig");
+    const tz: tz_mod.TzInfo = .{ .offset_secs = 0, .abbrev = "UTC", .source = .controller_fallback };
+    const out = fmtWhenIn(arena.allocator(), 1_779_364_800, tz);
+    try testing.expect(std.mem.indexOf(u8, out, "controller-local") != null);
+}
+
+test "fmtWhenIn negative offset (UTC-05:00, EST) shifts backward" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const tz_mod = @import("../tz.zig");
+    // 2026-05-21 12:00:00 UTC, -05:00 (EST) → 2026-05-21 07:00 EST.
+    const tz: tz_mod.TzInfo = .{ .offset_secs = -5 * 3600, .abbrev = "EST", .source = .target_probed };
+    const out = fmtWhenIn(arena.allocator(), 1_779_364_800, tz);
+    try testing.expect(std.mem.indexOf(u8, out, "2026-05-21 07:00") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "EST") != null);
 }

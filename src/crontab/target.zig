@@ -145,6 +145,82 @@ pub fn writeCrontab(a: std.mem.Allocator, t: Target, data: []const u8) !void {
     }
 }
 
+// ─── readCrontabAndTz ─────────────────────────────────────────────────────────
+// Piggybacks the timezone probe onto the same ssh round-trip that runs
+// `crontab -l`. Splits remote stdout on a sentinel line; pre-sentinel is
+// crontab content, post-sentinel is the probe payload. Zero extra ssh
+// round-trips for the common case of `ls`/`show` against `--all`.
+
+const tz_mod = @import("../tz.zig");
+pub const TzInfo = tz_mod.TzInfo;
+
+/// Random-looking sentinel chosen so it cannot collide with a valid cron
+/// line: leading `=` fails `splitScheduleCommand`, and even if a user's
+/// crontab contained this exact bytes, the split takes it as the boundary
+/// rather than treating it as cron content.
+pub const TZ_PROBE_SENTINEL = "=== LOOPER_TZ_PROBE_a9f3 ===";
+
+pub const ReadResult = struct {
+    content: []u8,
+    /// `null` when the target wasn't a remote (caller resolves controller
+    /// TZ for local/file) OR when the remote probe didn't make it back
+    /// (caller falls back to controller TZ with `.controller_fallback`).
+    tz: ?TzInfo,
+};
+
+pub fn readCrontabAndTz(a: std.mem.Allocator, t: Target, probe_tz: bool) !ReadResult {
+    if (!probe_tz or t.kind != .remote) {
+        const content = try readCrontab(a, t);
+        return .{ .content = content, .tz = null };
+    }
+    switch (t.kind) {
+        .file, .local => unreachable, // gated by probe_tz check above
+        .remote => {
+            var argv: std.ArrayList([]const u8) = .empty;
+            try argv.appendSlice(a, try sshArgvPrefix(a, t.host));
+            // `|| true` swallows the "no crontab for user" non-zero exit
+            // so the probe still runs. Leading `\n` ensures the sentinel
+            // is on its own line even when crontab output is empty or
+            // lacks a trailing newline.
+            const remote_cmd = if (t.user.len > 0)
+                try std.fmt.allocPrint(
+                    a,
+                    "crontab -l -u {s} 2>/dev/null || true; printf '\\n{s}\\n%s\\t%s\\n' \"$(date +%z)\" \"$(date +%Z)\"",
+                    .{ t.user, TZ_PROBE_SENTINEL },
+                )
+            else
+                try std.fmt.allocPrint(
+                    a,
+                    "crontab -l 2>/dev/null || true; printf '\\n{s}\\n%s\\t%s\\n' \"$(date +%z)\" \"$(date +%Z)\"",
+                    .{TZ_PROBE_SENTINEL},
+                );
+            try argv.append(a, remote_cmd);
+            const r = try posix.runCapture(a, argv.items, null);
+            if (r.code == 255 or r.code == 127) return BackendError.Unavailable;
+            return splitProbeResult(a, r.out);
+        },
+    }
+}
+
+/// Pulled out for inline testability without a real ssh round-trip.
+pub fn splitProbeResult(a: std.mem.Allocator, stdout: []const u8) !ReadResult {
+    const split_idx = std.mem.indexOf(u8, stdout, TZ_PROBE_SENTINEL) orelse {
+        // Sentinel missing → ssh succeeded but the remote shell didn't
+        // reach the printf (restricted shell, weird PATH, etc.). Treat
+        // as a plain crontab read so the caller falls back to controller
+        // TZ rather than failing the whole command.
+        return .{ .content = try a.dupe(u8, stdout), .tz = null };
+    };
+    var content_end = split_idx;
+    // Strip the single \n we prepended to the sentinel.
+    if (content_end > 0 and stdout[content_end - 1] == '\n') content_end -= 1;
+    const content = try a.dupe(u8, stdout[0..content_end]);
+    const after = stdout[split_idx + TZ_PROBE_SENTINEL.len ..];
+    const probe_text = std.mem.trimStart(u8, after, "\r\n");
+    const tz = tz_mod.parseDateProbe(a, probe_text);
+    return .{ .content = content, .tz = tz };
+}
+
 const testing = std.testing;
 
 test "sshArgvPrefix produces canonical batch-safe argv" {
@@ -176,4 +252,56 @@ test "Target.label distinguishes the three kinds" {
     try testing.expectEqualStrings("local", (Target{ .kind = .local }).label(a));
     try testing.expectEqualStrings("nas", (Target{ .kind = .remote, .host = "nas" }).label(a));
     try testing.expectEqualStrings("file:/tmp/x", (Target{ .kind = .file, .path = "/tmp/x" }).label(a));
+}
+
+test "splitProbeResult separates crontab content and probe payload" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Two cron lines, sentinel, probe.
+    const fixture =
+        "0 3 * * * /usr/local/bin/backup.sh\n" ++
+        "@reboot /opt/start.sh\n" ++
+        "\n" ++ TZ_PROBE_SENTINEL ++ "\n" ++
+        "+0800\tSGT\n";
+    const r = try splitProbeResult(a, fixture);
+    try testing.expectEqualStrings(
+        "0 3 * * * /usr/local/bin/backup.sh\n@reboot /opt/start.sh\n",
+        r.content,
+    );
+    try testing.expect(r.tz != null);
+    try testing.expectEqualStrings("SGT", r.tz.?.abbrev);
+    try testing.expectEqual(@as(i32, 8 * 3600), r.tz.?.offset_secs);
+}
+
+test "splitProbeResult handles empty crontab + probe" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const fixture = "\n" ++ TZ_PROBE_SENTINEL ++ "\n-0500\tEST\n";
+    const r = try splitProbeResult(a, fixture);
+    try testing.expectEqualStrings("", r.content);
+    try testing.expectEqualStrings("EST", r.tz.?.abbrev);
+}
+
+test "splitProbeResult missing sentinel falls through cleanly" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Restricted shell — printf never ran. Caller should fall back to
+    // controller TZ rather than fail.
+    const fixture = "@daily /opt/x.sh\n";
+    const r = try splitProbeResult(a, fixture);
+    try testing.expectEqualStrings("@daily /opt/x.sh\n", r.content);
+    try testing.expect(r.tz == null);
+}
+
+test "splitProbeResult sentinel with malformed probe payload yields content + null tz" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const fixture = "@daily /opt/x.sh\n\n" ++ TZ_PROBE_SENTINEL ++ "\ngarbage-not-a-probe\n";
+    const r = try splitProbeResult(a, fixture);
+    try testing.expectEqualStrings("@daily /opt/x.sh\n", r.content);
+    try testing.expect(r.tz == null);
 }

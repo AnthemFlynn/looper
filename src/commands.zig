@@ -14,9 +14,22 @@ const nlp = @import("cron/nlp.zig");
 const display = @import("ui/display.zig");
 const diff = @import("ui/diff.zig");
 const colors = @import("ui/colors.zig");
+const tz_mod = @import("tz.zig");
 
 const Ctx = ctx_mod.Ctx;
 const Target = target_mod.Target;
+const TzInfo = tz_mod.TzInfo;
+
+/// Picks the right computation routine: probed targets use the target's
+/// own zone (so a `0 3 * * *` job on a Singapore server actually means
+/// 3am SGT). Controller-local and controller-fallback paths compute in
+/// the controller's zone and label the output accordingly.
+fn nextFor(s: sched_mod.Schedule, from: i64, tz: TzInfo) ?i64 {
+    return switch (tz.source) {
+        .target_probed => next_run.nextRunInTz(s, from, tz.offset_secs),
+        else => next_run.nextRun(s, from),
+    };
+}
 
 pub fn applyMutation(ctx: *Ctx, t: Target, content: []const u8, new_content: []const u8, verb: []const u8) !void {
     if (std.mem.eql(u8, content, new_content)) {
@@ -41,7 +54,7 @@ pub fn applyMutation(ctx: *Ctx, t: Target, content: []const u8, new_content: []c
     }
 }
 
-pub fn cmdLs(ctx: *Ctx, t: Target, content: []const u8) !void {
+pub fn cmdLs(ctx: *Ctx, t: Target, content: []const u8, tz: TzInfo) !void {
     const ct = try model.parseCrontab(ctx.a, content);
     const now = posix.nowEpoch();
     if (ctx.json) {
@@ -51,9 +64,11 @@ pub fn cmdLs(ctx: *Ctx, t: Target, content: []const u8) !void {
             .job => |j| {
                 if (!first) ctx.emit(",", .{});
                 first = false;
-                const nr = next_run.nextRun(sched_mod.parseSchedule(j.schedule) catch sched_mod.Schedule{}, now);
-                ctx.emit("{{\"id\":\"{s}\",\"enabled\":{s},\"foreign\":{s},\"schedule\":\"{s}\",\"command\":\"{s}\",\"next\":{d}}}", .{
-                    j.id, if (j.enabled) "true" else "false", if (j.foreign) "true" else "false", display.jsonEsc(ctx.a, j.schedule), display.jsonEsc(ctx.a, j.command), nr orelse 0,
+                const nr = nextFor(sched_mod.parseSchedule(j.schedule) catch sched_mod.Schedule{}, now, tz);
+                ctx.emit("{{\"id\":\"{s}\",\"enabled\":{s},\"foreign\":{s},\"schedule\":\"{s}\",\"command\":\"{s}\",\"next\":{d},\"tz\":\"{s}\",\"tz_offset_secs\":{d}}}", .{
+                    j.id,                              if (j.enabled) "true" else "false",  if (j.foreign) "true" else "false",
+                    display.jsonEsc(ctx.a, j.schedule), display.jsonEsc(ctx.a, j.command),  nr orelse 0,
+                    display.jsonEsc(ctx.a, tz.abbrev), tz.offset_secs,
                 });
             },
             else => {},
@@ -74,13 +89,16 @@ pub fn cmdLs(ctx: *Ctx, t: Target, content: []const u8) !void {
         return;
     }
     const w = display.termWidth();
-    const cmd_w = if (w > 60) w - 56 else 24;
-    ctx.emit("{s}{s}{s}{s}   {s}{s}\n", .{ ctx.k(colors.BOLD), display.padTo(ctx.a, "ID", 14), display.padTo(ctx.a, "SCHEDULE", 22), display.padTo(ctx.a, "NEXT RUN", 24), "COMMAND", ctx.k(colors.RESET) });
+    // NEXT RUN widened from 24 → 36 to accommodate "YYYY-MM-DD HH:MM ABBR  in 1d 2h" plus optional
+    // "(controller-local)" trailer; cmd_w drops a matching 12 chars (w-56 → w-68).
+    const next_w: usize = 36;
+    const cmd_w = if (w > 72) w - 68 else 24;
+    ctx.emit("{s}{s}{s}{s}   {s}{s}\n", .{ ctx.k(colors.BOLD), display.padTo(ctx.a, "ID", 14), display.padTo(ctx.a, "SCHEDULE", 22), display.padTo(ctx.a, "NEXT RUN", next_w), "COMMAND", ctx.k(colors.RESET) });
     var fcount: usize = 0;
     for (ct.items.items) |it| switch (it) {
         .job => |j| {
             const sched = sched_mod.parseSchedule(j.schedule) catch null;
-            const nr: []const u8 = if (sched) |s| (if (next_run.nextRun(s, now)) |xx| humanize.fmtWhen(ctx.a, xx) else (if (s.reboot) "at boot" else "—")) else "INVALID";
+            const nr: []const u8 = if (sched) |s| (if (nextFor(s, now, tz)) |xx| humanize.fmtWhenIn(ctx.a, xx, tz) else (if (s.reboot) "at boot" else "—")) else "INVALID";
             const idcol = if (j.foreign) blk: {
                 fcount += 1;
                 break :blk std.fmt.allocPrint(ctx.a, "f{d}", .{fcount}) catch "f?";
@@ -89,10 +107,10 @@ pub fn cmdLs(ctx: *Ctx, t: Target, content: []const u8) !void {
             const dotcolor = if (j.foreign) ctx.k(colors.YELLOW) else if (j.enabled) ctx.k(colors.GREEN) else ctx.k(colors.DIM);
             const dot = if (j.foreign) "?" else if (j.enabled) "\xe2\x97\x8f" else "\xe2\x97\x8b";
             ctx.emit("{s}{s}{s}{s}{s}{s}{s} {s}{s}{s} {s}\n", .{
-                idcolor,                      display.padTo(ctx.a, idcol, 14),                ctx.k(colors.RESET),
-                ctx.k(colors.DIM),           display.padTo(ctx.a, j.schedule, 22),           ctx.k(colors.RESET),
-                display.padTo(ctx.a, nr, 24), dotcolor,                                       dot,
-                ctx.k(colors.RESET),         display.truncEllipsis(ctx.a, j.command, cmd_w),
+                idcolor,                           display.padTo(ctx.a, idcol, 14),      ctx.k(colors.RESET),
+                ctx.k(colors.DIM),                 display.padTo(ctx.a, j.schedule, 22), ctx.k(colors.RESET),
+                display.padTo(ctx.a, nr, next_w), dotcolor,                              dot,
+                ctx.k(colors.RESET),               display.truncEllipsis(ctx.a, j.command, cmd_w),
             });
         },
         else => {},
@@ -185,7 +203,7 @@ pub fn cmdRm(ctx: *Ctx, t: Target, content: []const u8, ids: [][]const u8) !void
     try applyMutation(ctx, t, content, new_content, verb);
 }
 
-pub fn cmdShow(ctx: *Ctx, t: Target, content: []const u8, id: []const u8) !void {
+pub fn cmdShow(ctx: *Ctx, t: Target, content: []const u8, id: []const u8, tz: TzInfo) !void {
     const ct = try model.parseCrontab(ctx.a, content);
     const idx = ct.findIndex(id) orelse {
         posix.eprint("looper: no managed job '{s}' on {s}\n", .{ id, t.label(ctx.a) });
@@ -198,6 +216,20 @@ pub fn cmdShow(ctx: *Ctx, t: Target, content: []const u8, id: []const u8) !void 
     ctx.emit("  meaning  : {s}\n", .{humanize.humanize(ctx.a, j.schedule)});
     ctx.emit("  command  : {s}\n", .{j.command});
     ctx.emit("  target   : {s}\n", .{t.label(ctx.a)});
+    const tz_origin: []const u8 = switch (tz.source) {
+        .controller_local => "controller-local",
+        .target_probed => "probed from target",
+        .controller_fallback => "controller-local — target probe failed",
+    };
+    ctx.emit("  timezone : {s} ({s}{c}{d:0>2}:{d:0>2}{s}, {s}{s}{s})\n", .{
+        tz.abbrev,
+        "UTC",
+        @as(u8, if (tz.offset_secs < 0) '-' else '+'),
+        @as(u32, @intCast(@divTrunc(if (tz.offset_secs < 0) -tz.offset_secs else tz.offset_secs, 3600))),
+        @as(u32, @intCast(@divTrunc(@mod(if (tz.offset_secs < 0) -tz.offset_secs else tz.offset_secs, 3600), 60))),
+        "",
+        ctx.k(colors.DIM), tz_origin, ctx.k(colors.RESET),
+    });
     const sched = sched_mod.parseSchedule(j.schedule) catch {
         ctx.emit("  next     : (does not parse)\n", .{});
         return;
@@ -210,11 +242,10 @@ pub fn cmdShow(ctx: *Ctx, t: Target, content: []const u8, id: []const u8) !void 
     var from = posix.nowEpoch();
     var k: usize = 0;
     while (k < 5) : (k += 1) {
-        const nr = next_run.nextRun(sched, from) orelse break;
-        ctx.emit("    {s}\n", .{humanize.fmtWhen(ctx.a, nr)});
+        const nr = nextFor(sched, from, tz) orelse break;
+        ctx.emit("    {s}\n", .{humanize.fmtWhenIn(ctx.a, nr, tz)});
         from = nr;
     }
-    if (t.kind == .remote) ctx.emit("  {s}(next-run times use this machine's timezone){s}\n", .{ ctx.k(colors.DIM), ctx.k(colors.RESET) });
 }
 
 pub fn cmdRun(ctx: *Ctx, t: Target, content: []const u8, id: []const u8) !void {
@@ -414,6 +445,7 @@ fn sshReachable(a: std.mem.Allocator, host: []const u8) bool {
 
 pub fn cmdDoctor(ctx: *Ctx, targets: []const Target, hosts_path: []const u8, use_all: bool) !void {
     var fails: usize = 0;
+    var warns: usize = 0;
 
     var has_local = false;
     var has_remote = false;
@@ -469,6 +501,7 @@ pub fn cmdDoctor(ctx: *Ctx, targets: []const Target, hosts_path: []const u8, use
     if (targets.len == 0) {
         ctx.emit("  {s}(no targets){s}\n", .{ ctx.k(colors.DIM), ctx.k(colors.RESET) });
     }
+    const tz_probe = @import("tz_probe.zig");
     for (targets) |t| {
         ctx.emit("  {s}{s}{s}{s}\n", .{ ctx.k(colors.BOLD), ctx.k(colors.CYAN), t.label(ctx.a), ctx.k(colors.RESET) });
         if (t.kind == .remote) {
@@ -488,6 +521,26 @@ pub fn cmdDoctor(ctx: *Ctx, targets: []const Target, hosts_path: []const u8, use
             printCheck(ctx, .fail, "crontab readable", @errorName(e));
             fails += 1;
         }
+        // Per-remote-target TZ probe — degraded path (probe fails) is a
+        // warning, not a fail: looper still works, just labels remote
+        // times as `(controller-local)` rather than rendering in target
+        // wall clock.
+        if (t.kind == .remote) {
+            if (ctx.no_target_tz) {
+                printCheck(ctx, .ok, "target tz", "skipped (--no-target-tz)");
+            } else if (tz_probe.probeRemote(ctx.a, t.host)) |tz| {
+                const detail = std.fmt.allocPrint(ctx.a, "{s} (UTC{c}{d:0>2}:{d:0>2})", .{
+                    tz.abbrev,
+                    @as(u8, if (tz.offset_secs < 0) '-' else '+'),
+                    @as(u32, @intCast(@divTrunc(if (tz.offset_secs < 0) -tz.offset_secs else tz.offset_secs, 3600))),
+                    @as(u32, @intCast(@divTrunc(@mod(if (tz.offset_secs < 0) -tz.offset_secs else tz.offset_secs, 3600), 60))),
+                }) catch tz.abbrev;
+                printCheck(ctx, .ok, "target tz", detail);
+            } else {
+                printCheck(ctx, .warn, "target tz", "probe failed — will fall back to (controller-local) labeling");
+                warns += 1;
+            }
+        }
     }
 
     ctx.emit("\n", .{});
@@ -495,7 +548,14 @@ pub fn cmdDoctor(ctx: *Ctx, targets: []const Target, hosts_path: []const u8, use
         ctx.emit("{s}{d} check(s) failed — fix before relying on looper{s}\n", .{
             ctx.k(colors.RED), fails, ctx.k(colors.RESET),
         });
+        if (warns > 0) ctx.emit("{s}{d} warning(s) — looper still works, see notes above{s}\n", .{
+            ctx.k(colors.YELLOW), warns, ctx.k(colors.RESET),
+        });
         ctx.fail(1);
+    } else if (warns > 0) {
+        ctx.emit("{s}{d} warning(s) — looper still works, see notes above{s}\n", .{
+            ctx.k(colors.YELLOW), warns, ctx.k(colors.RESET),
+        });
     } else {
         ctx.emit("{s}\xe2\x9c\x93 all checks passed{s}\n", .{ ctx.k(colors.GREEN), ctx.k(colors.RESET) });
     }

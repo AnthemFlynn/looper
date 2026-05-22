@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`looper` is a Zig 0.16 CLI that manages cron jobs — locally, for another user, on remote hosts over `ssh`, or in a plain crontab file. The source lives under `src/` (~1400 lines across 16 modules), libc-only, no third-party dependencies. Built with `build.zig` (`zig build`); cross-targets are passed via `-Dtarget=...`.
+`looper` is a Zig 0.16 CLI that manages cron jobs — locally, for another user, on remote hosts over `ssh`, or in a plain crontab file. The source lives under `src/` (~1900 lines across 18 modules), libc-only, no third-party dependencies. Built with `build.zig` (`zig build`); cross-targets are passed via `-Dtarget=...`.
 
 ## Build & run
 
@@ -27,15 +27,17 @@ src/
   cli.zig                 Pure argv parser (ParsedArgs) and target-list builder; all tested in isolation
   ctx.zig                 Ctx struct (allocator, flags, output buffer, exit_code accumulator), aw helper
   posix.zig               Single @cImport for libc; runCapture / runInherit / writeAll / getenv / nowEpoch
+  tz.zig                  Pure TzInfo {offset_secs, abbrev, source}; controllerTz, parseDateProbe
+  tz_probe.zig            Remote-side ssh TZ probe + per-run Cache; pairs with tz.zig
   commands.zig            applyMutation + cmdLs/Add/Rm/Toggle/Show/Run/Explain/Backup/Restore/Import/Doctor
   cron/
     schedule.zig          Schedule bitset + parseSchedule + fieldBounds + parseField + nameToNum
-    next_run.zig          nextRun using DOM/DOW OR-rule; libc localtime_r/mktime for DST
-    humanize.zig          Cron expression → English; relTime, fmtWhen
+    next_run.zig          nextRun (controller-zone, DST-correct) + nextRunInTz (fixed-offset target zone)
+    humanize.zig          Cron expression → English; relTime, fmtWhen, fmtWhenIn (renders in TzInfo)
     nlp.zig               English → standard cron via nlpToCron / toCron front-end
   crontab/
     model.zig             MARKER, Job, Item, Crontab, parseCrontab, serialize, splitScheduleCommand
-    target.zig            Target/TargetKind + readCrontab/writeCrontab (switch dispatch over 3 backends)
+    target.zig            Target/TargetKind + readCrontab/writeCrontab + readCrontabAndTz (sentinel-split)
     backup.zig            doBackup, newestBackup, stateDir, backupDir, utcStamp, mkdirP
   ui/
     colors.zig            ANSI escape constants (BOLD/DIM/RED/…); consumed via ctx.k(CODE)
@@ -61,6 +63,7 @@ Inline `test "..." { ... }` blocks colocated at the bottom of each module. `zig 
 - **Color is opt-in to a tty and `NO_COLOR`.** Use `ctx.k(CODE)` rather than hardcoding escape sequences so `--no-color` / `NO_COLOR` keep working.
 - **Output goes through `ctx.emit` + `ctx.flush`,** not direct stdio. Errors go through `posix.eprint`. `Ctx.exit_code` + `ctx.fail(code)` accumulate non-fatal failures (first-failure-wins) so a multi-target run still surfaces a non-zero exit.
 - **`doctor` owns its own target loop.** It branches before the standard per-target read loop in `main.zig` because the read failures the loop treats as fatal-per-target are exactly what doctor is reporting on. New "diagnostic" commands should follow the same pattern.
+- **Timezones flow as values through `cron/`.** The `cron/` subdir stays I/O-free; any function that needs the target's zone takes a `TzInfo` (or just `offset_secs`) parameter. `nextRunInTz` and `fmtWhenIn` are the canonical "operate in a supplied zone" functions. The I/O — the ssh-side `date +%z` probe — lives in `tz_probe.zig` (standalone) and `crontab/target.zig` (piggybacked on `crontab -l` via sentinel split). Never call probing code from `cron/`.
 
 ## SOLID lines
 

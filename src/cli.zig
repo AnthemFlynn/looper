@@ -99,6 +99,10 @@ pub fn parseArgv(a: std.mem.Allocator, argv: []const []const u8, ctx: *ctx_mod.C
             ctx.color = false;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--no-target-tz")) {
+            ctx.no_target_tz = true;
+            continue;
+        }
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             p.force_help = true;
             continue;
