@@ -33,10 +33,32 @@ fn nextFor(s: sched_mod.Schedule, from: i64, tz: TzInfo) ?i64 {
 
 pub fn applyMutation(ctx: *Ctx, t: Target, content: []const u8, new_content: []const u8, verb: []const u8) !void {
     if (std.mem.eql(u8, content, new_content)) {
+        if (ctx.json and ctx.dry_run) {
+            // No-change dry-run in JSON mode: emit a structured no-op so
+            // consumers can still distinguish "ran" from "errored."
+            ctx.emit("{{\"dry_run\":true,\"target\":\"{s}\",\"action\":\"{s}\",\"changed\":false,\"diff\":[]}}\n", .{
+                display.jsonEsc(ctx.a, t.label(ctx.a)),
+                display.jsonEsc(ctx.a, verb),
+            });
+            return;
+        }
         if (!ctx.quiet) ctx.emit("{s}no change{s} on {s}\n", .{ ctx.k(colors.DIM), ctx.k(colors.RESET), t.label(ctx.a) });
         return;
     }
     if (ctx.dry_run) {
+        if (ctx.json) {
+            const ops = diff.diffOps(ctx.a, content, new_content);
+            ctx.emit("{{\"dry_run\":true,\"target\":\"{s}\",\"action\":\"{s}\",\"changed\":true,\"diff\":[", .{
+                display.jsonEsc(ctx.a, t.label(ctx.a)),
+                display.jsonEsc(ctx.a, verb),
+            });
+            for (ops, 0..) |dl, i| {
+                if (i > 0) ctx.emit(",", .{});
+                ctx.emit("{{\"op\":\"{s}\",\"line\":\"{s}\"}}", .{ diff.opName(dl.op), display.jsonEsc(ctx.a, dl.line) });
+            }
+            ctx.emit("]}}\n", .{});
+            return;
+        }
         ctx.emit("{s}# dry-run: {s} on {s} (nothing written){s}\n", .{ ctx.k(colors.YELLOW), verb, t.label(ctx.a), ctx.k(colors.RESET) });
         diff.printDiff(ctx, content, new_content);
         return;
@@ -58,18 +80,36 @@ pub fn cmdLs(ctx: *Ctx, t: Target, content: []const u8, tz: TzInfo) !void {
     const ct = try model.parseCrontab(ctx.a, content);
     const now = posix.nowEpoch();
     if (ctx.json) {
+        const target_label = t.label(ctx.a);
         ctx.emit("[", .{});
         var first = true;
         for (ct.items.items) |it| switch (it) {
             .job => |j| {
                 if (!first) ctx.emit(",", .{});
                 first = false;
-                const nr = nextFor(sched_mod.parseSchedule(j.schedule) catch sched_mod.Schedule{}, now, tz);
-                ctx.emit("{{\"id\":\"{s}\",\"enabled\":{s},\"foreign\":{s},\"schedule\":\"{s}\",\"command\":\"{s}\",\"next\":{d},\"tz\":\"{s}\",\"tz_offset_secs\":{d}}}", .{
-                    j.id,                              if (j.enabled) "true" else "false",  if (j.foreign) "true" else "false",
-                    display.jsonEsc(ctx.a, j.schedule), display.jsonEsc(ctx.a, j.command),  nr orelse 0,
-                    display.jsonEsc(ctx.a, tz.abbrev), tz.offset_secs,
-                });
+                const sched = sched_mod.parseSchedule(j.schedule) catch null;
+                // `next` is null when the schedule doesn't parse OR has
+                // no next fire (e.g., @reboot). Previously emitted 0,
+                // which silently aliased "January 1970" — a real epoch.
+                const nr_opt: ?i64 = if (sched) |s| nextFor(s, now, tz) else null;
+                const human_sched = humanize.humanize(ctx.a, j.schedule);
+                ctx.emit(
+                    "{{\"id\":\"{s}\",\"enabled\":{s},\"foreign\":{s},\"target\":\"{s}\"," ++
+                        "\"schedule\":\"{s}\",\"human_schedule\":\"{s}\",\"command\":\"{s}\"," ++
+                        "\"tz\":\"{s}\",\"tz_offset_secs\":{d},\"tz_source\":\"{s}\"",
+                    .{
+                        j.id,                                   if (j.enabled) "true" else "false", if (j.foreign) "true" else "false", display.jsonEsc(ctx.a, target_label),
+                        display.jsonEsc(ctx.a, j.schedule),     display.jsonEsc(ctx.a, human_sched), display.jsonEsc(ctx.a, j.command),
+                        display.jsonEsc(ctx.a, tz.abbrev),      tz.offset_secs,                     tz_mod.sourceStr(tz.source),
+                    },
+                );
+                if (nr_opt) |nr| {
+                    const nh = humanize.fmtWhenIn(ctx.a, nr, tz);
+                    ctx.emit(",\"next\":{d},\"next_human\":\"{s}\"", .{ nr, display.jsonEsc(ctx.a, nh) });
+                } else {
+                    ctx.emit(",\"next\":null,\"next_human\":null", .{});
+                }
+                ctx.emit("}}", .{});
             },
             else => {},
         };
@@ -245,6 +285,7 @@ pub fn cmdShow(ctx: *Ctx, t: Target, content: []const u8, id: []const u8, tz: Tz
         return;
     };
     const j = ct.items.items[idx].job;
+    if (ctx.json) return cmdShowJson(ctx, t, j, tz);
     ctx.emit("{s}{s}{s}{s}  {s}{s}{s}\n", .{ ctx.k(colors.BOLD), ctx.k(colors.CYAN), j.id, ctx.k(colors.RESET), if (j.enabled) ctx.k(colors.GREEN) else ctx.k(colors.DIM), if (j.enabled) "enabled" else "disabled", ctx.k(colors.RESET) });
     ctx.emit("  schedule : {s}{s}{s}\n", .{ ctx.k(colors.DIM), j.schedule, ctx.k(colors.RESET) });
     ctx.emit("  meaning  : {s}\n", .{humanize.humanize(ctx.a, j.schedule)});
@@ -280,6 +321,54 @@ pub fn cmdShow(ctx: *Ctx, t: Target, content: []const u8, id: []const u8, tz: Tz
         ctx.emit("    {s}\n", .{humanize.fmtWhenIn(ctx.a, nr, tz)});
         from = nr;
     }
+}
+
+/// Emits a JSON array of {epoch, human} pairs for the next N fires of
+/// `sched` starting from `from_utc`. Shared between show and explain so
+/// the contract is identical.
+fn nextArrayJson(ctx: *Ctx, sched: sched_mod.Schedule, from_utc: i64, tz: TzInfo, count: usize) void {
+    ctx.emit("[", .{});
+    var from = from_utc;
+    var k: usize = 0;
+    var first = true;
+    while (k < count) : (k += 1) {
+        const nr = nextFor(sched, from, tz) orelse break;
+        if (!first) ctx.emit(",", .{});
+        first = false;
+        const h = humanize.fmtWhenIn(ctx.a, nr, tz);
+        ctx.emit("{{\"epoch\":{d},\"human\":\"{s}\"}}", .{ nr, display.jsonEsc(ctx.a, h) });
+        from = nr;
+    }
+    ctx.emit("]", .{});
+}
+
+fn cmdShowJson(ctx: *Ctx, t: Target, j: model.Job, tz: TzInfo) !void {
+    const target_label = t.label(ctx.a);
+    const human_sched = humanize.humanize(ctx.a, j.schedule);
+    const sched = sched_mod.parseSchedule(j.schedule) catch null;
+    ctx.emit(
+        "{{\"target\":\"{s}\",\"id\":\"{s}\",\"enabled\":{s}," ++
+            "\"schedule\":\"{s}\",\"human_schedule\":\"{s}\",\"command\":\"{s}\"," ++
+            "\"tz\":\"{s}\",\"tz_offset_secs\":{d},\"tz_source\":\"{s}\"",
+        .{
+            display.jsonEsc(ctx.a, target_label), j.id,                                  if (j.enabled) "true" else "false",
+            display.jsonEsc(ctx.a, j.schedule),    display.jsonEsc(ctx.a, human_sched),    display.jsonEsc(ctx.a, j.command),
+            display.jsonEsc(ctx.a, tz.abbrev),     tz.offset_secs,                         tz_mod.sourceStr(tz.source),
+        },
+    );
+    if (sched) |s| {
+        ctx.emit(",\"reboot\":{s},\"next\":", .{if (s.reboot) "true" else "false"});
+        if (s.reboot) {
+            ctx.emit("[]", .{});
+        } else {
+            nextArrayJson(ctx, s, posix.nowEpoch(), tz, 5);
+        }
+    } else {
+        // Unparseable schedule — surface as nulls so consumers can spot
+        // the error without text-matching.
+        ctx.emit(",\"reboot\":null,\"next\":null,\"parse_error\":\"invalid schedule\"", .{});
+    }
+    ctx.emit("}}\n", .{});
 }
 
 pub fn cmdRun(ctx: *Ctx, t: Target, content: []const u8, id: []const u8) !void {
@@ -324,6 +413,27 @@ pub fn cmdExplain(ctx: *Ctx, input: []const u8) !void {
         ctx.fail(1);
         return;
     };
+    if (ctx.json) {
+        const tz = tz_mod.controllerTz(ctx.a);
+        const interpreted = !std.mem.eql(u8, schedule, input);
+        const human_sched = humanize.humanize(ctx.a, schedule);
+        ctx.emit(
+            "{{\"input\":\"{s}\",\"schedule\":\"{s}\",\"human_schedule\":\"{s}\"," ++
+                "\"interpreted\":{s},\"reboot\":{s},\"tz\":\"{s}\",\"tz_offset_secs\":{d},\"next\":",
+            .{
+                display.jsonEsc(ctx.a, input),    display.jsonEsc(ctx.a, schedule), display.jsonEsc(ctx.a, human_sched),
+                if (interpreted) "true" else "false", if (sched.reboot) "true" else "false",
+                display.jsonEsc(ctx.a, tz.abbrev), tz.offset_secs,
+            },
+        );
+        if (sched.reboot) {
+            ctx.emit("[]", .{});
+        } else {
+            nextArrayJson(ctx, sched, posix.nowEpoch(), tz, 5);
+        }
+        ctx.emit("}}\n", .{});
+        return;
+    }
     if (!std.mem.eql(u8, schedule, input))
         ctx.emit("{s}\"{s}\"{s} \xe2\x86\x92 {s}{s}{s}\n", .{ ctx.k(colors.DIM), input, ctx.k(colors.RESET), ctx.k(colors.BOLD), schedule, ctx.k(colors.RESET) })
     else
@@ -780,6 +890,135 @@ test "cmdEdit rejects invalid schedule" {
     // File content must be unchanged after a rejected edit.
     const got = try target_mod.readFileAll(a, tgt.path);
     try testing.expectEqualStrings(after_add, got);
+}
+
+test "cmdLs --json emits next:null and next_human:null for @reboot" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    ctx.json = true;
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "@reboot", "/opt/start.sh", "boot");
+    ctx.buf.clearRetainingCapacity();
+    const content = try target_mod.readFileAll(a, tgt.path);
+    const tz = tz_mod.controllerTz(a);
+    try cmdLs(&ctx, tgt, content, tz);
+    // @reboot has no next-run; ensure JSON gives a real null, not "next:0".
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"next\":null") != null);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"next_human\":null") != null);
+    // Old buggy shape — make sure we never emit `"next":0`.
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"next\":0") == null);
+}
+
+test "cmdLs --json carries target, human_schedule, tz_source" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    ctx.json = true;
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo");
+    ctx.buf.clearRetainingCapacity();
+    const content = try target_mod.readFileAll(a, tgt.path);
+    const tz = tz_mod.controllerTz(a);
+    try cmdLs(&ctx, tgt, content, tz);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"target\":\"file:") != null);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"human_schedule\":\"at 03:00 every day\"") != null);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"tz_source\":\"controller_local\"") != null);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"next_human\":\"") != null);
+}
+
+test "cmdShow --json single object with next array of {epoch,human}" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    ctx.json = true;
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo");
+    ctx.buf.clearRetainingCapacity();
+    const content = try target_mod.readFileAll(a, tgt.path);
+    const tz = tz_mod.controllerTz(a);
+    try cmdShow(&ctx, tgt, content, "demo", tz);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"id\":\"demo\"") != null);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"reboot\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"next\":[{\"epoch\":") != null);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"human\":\"") != null);
+}
+
+test "cmdShow --json with @reboot emits empty next array" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    ctx.json = true;
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "@reboot", "/opt/start.sh", "boot");
+    ctx.buf.clearRetainingCapacity();
+    const content = try target_mod.readFileAll(a, tgt.path);
+    const tz = tz_mod.controllerTz(a);
+    try cmdShow(&ctx, tgt, content, "boot", tz);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"reboot\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"next\":[]") != null);
+}
+
+test "cmdExplain --json includes input, interpreted, and next array" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    ctx.json = true;
+    try cmdExplain(&ctx, "every weekday at 8am");
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"input\":\"every weekday at 8am\"") != null);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"schedule\":\"0 8 * * 1-5\"") != null);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"interpreted\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"next\":[{\"epoch\":") != null);
+}
+
+test "cmdExplain --json @reboot has empty next + reboot:true" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    ctx.json = true;
+    try cmdExplain(&ctx, "@reboot");
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"reboot\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"next\":[]") != null);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"interpreted\":false") != null);
+}
+
+test "applyMutation dry-run --json emits structured diff" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    ctx.json = true;
+    ctx.dry_run = true;
+    const tgt = try tmpTarget(a);
+    try applyMutation(&ctx, tgt, "alpha\nbeta\n", "alpha\ngamma\n", "test action");
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"dry_run\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"changed\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"op\":\"remove\",\"line\":\"beta\"") != null);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"op\":\"add\",\"line\":\"gamma\"") != null);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"action\":\"test action\"") != null);
+}
+
+test "applyMutation dry-run --json no-change emits changed:false, empty diff" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    ctx.json = true;
+    ctx.dry_run = true;
+    const tgt = try tmpTarget(a);
+    try applyMutation(&ctx, tgt, "same\n", "same\n", "noop");
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"changed\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"diff\":[]") != null);
 }
 
 test "cmdEdit accepts an @macro schedule" {

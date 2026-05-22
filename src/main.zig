@@ -122,8 +122,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     const multi = targets.len > 1;
+    // Suppress per-target headers (and the trailing blank line below)
+    // in JSON mode — they break parsability. Each JSON document carries
+    // its own `target` field for disambiguation.
+    const visual_multi = multi and !ctx.json;
     for (targets) |t| {
-        if (multi) ctx.emit("{s}{s}=== {s} ==={s}\n", .{ ctx.k(colors.BOLD), ctx.k(colors.BLUE), t.label(a), ctx.k(colors.RESET) });
+        if (visual_multi) ctx.emit("{s}{s}=== {s} ==={s}\n", .{ ctx.k(colors.BOLD), ctx.k(colors.BLUE), t.label(a), ctx.k(colors.RESET) });
         // For remote targets, the same ssh round-trip also fetches the
         // target's TZ (sentinel-split). Local/file return tz=null and we
         // resolve controller TZ here.
@@ -193,7 +197,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             .restore => try cmds.cmdRestore(&ctx, t, content, if (rest.len > 0) rest[0] else null),
             else => {},
         }
-        if (multi) ctx.emit("\n", .{});
+        if (visual_multi) ctx.emit("\n", .{});
         ctx.flush();
     }
     ctx.flush();

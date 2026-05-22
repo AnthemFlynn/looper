@@ -86,7 +86,7 @@ Target (default: your local crontab)
 Options
       --dry-run            show the diff that would be written; write nothing
   -y, --yes                assume yes (required for destructive ops without a tty)
-      --json               machine-readable output (ls)
+      --json               machine-readable output (ls, show, explain, dry-run)
   -q, --quiet              only print errors
       --no-color           disable color (also honored: NO_COLOR)
 ```
@@ -256,6 +256,65 @@ Use `--no-target-tz` to skip probing entirely and force controller-local
 labeling — handy for scripted consumers that want a stable rendering, or for
 targets with a deliberately broken `date` binary. `doctor` reports the probed
 TZ for each remote target so you can verify it once and forget it.
+
+## JSON output
+
+`--json` produces machine-readable output for `ls`, `show`, `explain`, and
+`--dry-run` mutations. Multi-target invocations emit one JSON document per
+target (one `ls` array per host, one `show` object per host, etc.) — the
+human-readable `=== host ===` headers are suppressed under `--json` so the
+output stays parseable. Every document carries its own `target` field so the
+hosts are disambiguated.
+
+**`ls`** — array of jobs:
+
+```json
+[{
+  "id": "db-backup",
+  "enabled": true,
+  "foreign": false,
+  "target": "sg-host",
+  "schedule": "0 3 * * *",
+  "human_schedule": "at 03:00 every day",
+  "command": "/usr/local/bin/backup.sh --db",
+  "tz": "SGT",
+  "tz_offset_secs": 28800,
+  "tz_source": "target_probed",
+  "next": 1779438000,
+  "next_human": "2026-05-22 03:00 SGT  in 12h 27m"
+}]
+```
+
+`next` is **`null`** (not `0`) when the schedule doesn't parse or has no next
+fire (e.g., `@reboot`); `next_human` mirrors that. `tz_source` is one of
+`controller_local`, `target_probed`, or `controller_fallback`.
+
+**`show`** — single object, with `next` as an array of `{epoch, human}` pairs
+covering the next 5 fires (empty for `@reboot`, `null` for unparseable schedules
+with an additional `parse_error` field).
+
+**`explain`** — single object: `input`, resolved `schedule`, `human_schedule`,
+`interpreted` (true if NLP rewrote the input), `reboot`, `tz`, `tz_offset_secs`,
+and `next` (same shape as `show`).
+
+**`--dry-run` with a mutation** — single object:
+
+```json
+{
+  "dry_run": true,
+  "target": "file:/tmp/c",
+  "action": "edited 'db-backup'",
+  "changed": true,
+  "diff": [
+    {"op": "context", "line": "#looper# id=db-backup enabled=1"},
+    {"op": "remove",  "line": "0 3 * * * /bin/x"},
+    {"op": "add",     "line": "0 4 * * * /bin/x"}
+  ]
+}
+```
+
+A no-op dry-run yields `"changed": false` with `"diff": []` so consumers can
+distinguish "ran with no work to do" from "errored."
 
 ## Notes & limits
 

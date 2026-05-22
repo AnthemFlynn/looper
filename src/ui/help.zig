@@ -38,7 +38,7 @@ pub fn printHelp(ctx: *ctx_mod.Ctx) void {
     ctx.emit("{s}OPTIONS{s}\n", .{ B, R });
     ctx.emit("      --dry-run             Show the change as a diff; write nothing\n", .{});
     ctx.emit("  -y, --yes                 Skip confirmation prompts\n", .{});
-    ctx.emit("      --json                Machine-readable output (for ls)\n", .{});
+    ctx.emit("      --json                Machine-readable output (ls, show, explain, dry-run)\n", .{});
     ctx.emit("  -q, --quiet               Print only errors\n", .{});
     ctx.emit("      --no-color            Disable color (also obeys NO_COLOR)\n", .{});
     ctx.emit("      --no-target-tz        Skip remote TZ probe; render everything as controller-local\n", .{});

@@ -63,6 +63,18 @@ pub fn controllerTzAt(a: std.mem.Allocator, ts_utc: i64) TzInfo {
     return .{ .offset_secs = offset, .abbrev = abbrev, .source = .controller_local };
 }
 
+/// Canonical snake_case names for JSON emit. Don't use `@tagName` on
+/// `Source` directly — it returns the Zig identifier, but the contract
+/// for `--json` is stability across refactors, not whatever the enum
+/// happens to be named today.
+pub fn sourceStr(s: Source) []const u8 {
+    return switch (s) {
+        .controller_local => "controller_local",
+        .target_probed => "target_probed",
+        .controller_fallback => "controller_fallback",
+    };
+}
+
 /// `UTC±HH:MM` format. Used when `%Z` produces nothing (musl in some
 /// configurations) or when a probe returns only `+%z` without a usable
 /// `%Z` abbrev.
@@ -184,4 +196,10 @@ test "parseDateProbe accepts numeric-style abbrev like +12" {
     defer arena.deinit();
     const info = parseDateProbe(arena.allocator(), "+1200\t+12\n").?;
     try testing.expectEqualStrings("+12", info.abbrev);
+}
+
+test "sourceStr maps each variant to canonical JSON name" {
+    try testing.expectEqualStrings("controller_local", sourceStr(.controller_local));
+    try testing.expectEqualStrings("target_probed", sourceStr(.target_probed));
+    try testing.expectEqualStrings("controller_fallback", sourceStr(.controller_fallback));
 }
