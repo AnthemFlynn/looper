@@ -56,6 +56,7 @@ pub fn printHelp(ctx: *ctx_mod.Ctx) void {
     ctx.emit("  {s}  {s}# preview, no changes{s}\n", .{ "looper explain \"at noon on weekends\"          ", D, R });
     ctx.emit("  {s}  {s}# remove an unmanaged job (see ls){s}\n", .{ "looper rm f1                                  ", D, R });
     ctx.emit("  {s}  {s}# every host in the fleet{s}\n", .{ "looper --all ls                               ", D, R });
+    ctx.emit("  {s}  {s}# pipe to jq, prometheus_exporter, etc.{s}\n", .{ "looper show db-backup --json                  ", D, R });
     ctx.emit("\n", .{});
     ctx.emit("Every change is backed up first; there is deliberately no \"delete everything\".\n", .{});
 }

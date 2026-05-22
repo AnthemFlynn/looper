@@ -260,11 +260,13 @@ TZ for each remote target so you can verify it once and forget it.
 ## JSON output
 
 `--json` produces machine-readable output for `ls`, `show`, `explain`, and
-`--dry-run` mutations. Multi-target invocations emit one JSON document per
-target (one `ls` array per host, one `show` object per host, etc.) — the
-human-readable `=== host ===` headers are suppressed under `--json` so the
-output stays parseable. Every document carries its own `target` field so the
-hosts are disambiguated.
+`--dry-run` mutations. Flag position is free — `looper show db-backup --json`,
+`looper --json show db-backup`, and any other interleaving produce the same
+output. Multi-target invocations emit one JSON document per target (one `ls`
+array per host, one `show` object per host, etc.) — the human-readable
+`=== host ===` headers are suppressed under `--json` so the output stays
+parseable. Every document carries its own `target` field so the hosts are
+disambiguated.
 
 **`ls`** — array of jobs:
 
