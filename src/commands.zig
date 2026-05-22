@@ -192,8 +192,11 @@ pub fn extractBinary(command: []const u8) ?[]const u8 {
         const c0 = tok[0];
         // Anything we can't statically interpret as a plain binary
         // path: shell groupings, expansions, quoting, command
-        // substitution, escapes. Better to skip than to mis-report.
-        if (c0 == '(' or c0 == '{' or c0 == '$' or c0 == '"' or c0 == '\'' or c0 == '`' or c0 == '\\') return null;
+        // substitution, escapes, or a bare leading `=` (which `isEnvAssign`
+        // does not accept — but reaching here means we saw `=foo`,
+        // which is neither a name nor an assignment). Better to skip
+        // than to mis-report.
+        if (c0 == '(' or c0 == '{' or c0 == '$' or c0 == '"' or c0 == '\'' or c0 == '`' or c0 == '\\' or c0 == '=') return null;
         return tok;
     }
     return null;
@@ -219,6 +222,11 @@ fn isEnvAssign(tok: []const u8) bool {
 /// have to shell-quote it for the remote `command -v` invocation.
 fn isPlainBinaryName(name: []const u8) bool {
     if (name.len == 0) return false;
+    // Real cron commands never start with `-` — that's an option flag
+    // someone forgot to pair with a binary. `command -v -- '-c'` would
+    // technically be safe (we use `--`), but reporting "command '-c'
+    // not found" is misleading noise.
+    if (name[0] == '-') return false;
     for (name) |b| {
         if (!(std.ascii.isAlphanumeric(b) or b == '_' or b == '-' or b == '.' or b == '/' or b == '+')) return false;
     }
@@ -242,6 +250,17 @@ pub fn commandReachable(a: std.mem.Allocator, t: Target, binary: []const u8) Rea
             return if (hasInPath(a, binary)) .found else .missing;
         },
         .remote => {
+            // `-u <user>` makes the cron job run as a different user
+            // with a different PATH; ssh-ing as our login user would
+            // probe the wrong environment and silently return .found
+            // when the binary isn't on the crontab owner's PATH. That
+            // is exactly the false-confidence outcome this preflight
+            // exists to prevent. Skipping is safer than guessing wrong.
+            // Delegating via `sudo -u`/`su -l` would work in some
+            // configurations but requires extra auth setup we can't
+            // assume — and the warning is non-blocking anyway, so a
+            // silent skip costs less than a misleading green light.
+            if (t.user.len > 0) return .skipped;
             var argv: std.ArrayList([]const u8) = .empty;
             const prefix = target_mod.sshArgvPrefix(a, t.host) catch return .skipped;
             argv.appendSlice(a, prefix) catch return .skipped;
@@ -1577,6 +1596,8 @@ test "extractBinary gives up on shell constructs" {
     try testing.expect(extractBinary("`backtick`") == null);
     try testing.expect(extractBinary("\"quoted\"") == null);
     try testing.expect(extractBinary("\\escaped") == null);
+    // Bare leading `=` — not a valid env-var assignment, not a binary.
+    try testing.expect(extractBinary("=foo") == null);
 }
 
 test "extractBinary returns null on empty / whitespace-only" {
@@ -1628,37 +1649,97 @@ test "commandReachable skips shell-metacharacter inputs" {
     try testing.expectEqual(ReachResult.skipped, commandReachable(a, t, "$VAR"));
     try testing.expectEqual(ReachResult.skipped, commandReachable(a, t, "foo;rm -rf"));
     try testing.expectEqual(ReachResult.skipped, commandReachable(a, t, "foo bar"));
+    // Leading `-` is rejected: avoids reporting "command '-c' not
+    // found" when the user mis-wrote the command.
+    try testing.expectEqual(ReachResult.skipped, commandReachable(a, t, "-c"));
+    try testing.expectEqual(ReachResult.skipped, commandReachable(a, t, "--help"));
 }
 
-test "cmdAdd with check_command=true on local + missing binary warns but still adds" {
+test "commandReachable on remote target with -u user is skipped (avoids false confidence)" {
+    // The crontab job runs as `t.user` with that user's PATH; our ssh
+    // login user's PATH would give a misleading .found. We refuse to
+    // probe rather than mislead — verified without actually shelling
+    // out by setting an unreachable host (the user gate must short-
+    // circuit before any ssh attempt).
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const t: Target = .{ .kind = .remote, .host = "host.invalid", .user = "cronuser" };
+    try testing.expectEqual(ReachResult.skipped, commandReachable(a, t, "/bin/sh"));
+}
+
+test "cmdAdd local+missing+check_command emits the yellow ! warning" {
+    // dry_run=true keeps applyMutation from invoking `crontab` for the
+    // local target — the probe still runs (it doesn't depend on the
+    // dry-run flag) and the warning emits to the buffer.
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var ctx = newCtx(a);
     ctx.color = false;
-    const tgt = try tmpTarget(a);
-    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/zzz/nonexistent/binary/almost/certainly", "demo", true);
-    // Warning text should land in the buffer (target is .file, which is
-    // skipped — but the LOCAL probe semantics are tested above; here we
-    // pin the behaviour for the .file target: NO warning is emitted
-    // because the probe is skipped). Job is still added either way.
-    const got = try target_mod.readFileAll(a, tgt.path);
-    try testing.expect(std.mem.indexOf(u8, got, "#looper# id=demo enabled=1") != null);
-    // .file target: warning suppressed (skipped probe), buf has no '!'.
+    ctx.dry_run = true;
+    const tgt: Target = .{ .kind = .local };
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/zzz/almost/certainly/not/here", "demo", true);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "not found on local") != null);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "/zzz/almost/certainly/not/here") != null);
+}
+
+test "cmdAdd local+found+check_command emits NO warning (binary exists)" {
+    // Positive control: `/bin/sh` exists everywhere this test would
+    // run, so the probe returns .found and the warning path is silent.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    ctx.color = false;
+    ctx.dry_run = true;
+    const tgt: Target = .{ .kind = .local };
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/sh -c 'echo hi'", "demo", true);
     try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "not found") == null);
 }
 
-test "cmdAdd with check_command=true under --json does NOT pollute stdout" {
+test "cmdAdd local+missing+check_command under --json suppresses the warning" {
+    // The "! command not found" line is non-JSON text; under --json it
+    // would corrupt structured stdout, so it must be silenced. We use
+    // a .local target so the probe actually runs and returns .missing
+    // — under --json + .file the test would pass trivially.
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var ctx = newCtx(a);
     ctx.json = true;
-    const tgt = try tmpTarget(a);
-    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/zzz/missing/bin", "demo", true);
-    // The "not found" warning is non-JSON text and would corrupt
-    // structured output; we suppress it under --json.
+    ctx.dry_run = true;
+    const tgt: Target = .{ .kind = .local };
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/zzz/almost/certainly/not/here", "demo", true);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "not found") == null);
+}
+
+test "cmdAdd local+missing+check_command under --quiet suppresses the warning" {
+    // --quiet means "diagnostic output off"; the preflight is a
+    // diagnostic, not a hard error, so it goes silent too.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    ctx.color = false;
+    ctx.quiet = true;
+    ctx.dry_run = true;
+    const tgt: Target = .{ .kind = .local };
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/zzz/almost/certainly/not/here", "demo", true);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "not found") == null);
+}
+
+test "cmdAdd check_command=false does not probe at all" {
+    // Default path: even with a missing binary, no warning fires when
+    // the user didn't opt in. Pins the "no behaviour change without
+    // the flag" contract from the commit message.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    ctx.color = false;
+    ctx.dry_run = true;
+    const tgt: Target = .{ .kind = .local };
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/zzz/missing", "demo", false);
     try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "not found") == null);
 }
