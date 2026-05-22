@@ -5,8 +5,8 @@ user, across remote hosts over **ssh**, or in a plain crontab file. One job,
 done well: **manage cron jobs**. It speaks standard 5-field cron plus the
 `@macros` cron already understands; it never invents a scheduler syntax.
 
-Single file (`main.zig`, ~850 lines of Zig 0.16), no dependencies beyond libc,
-static binaries for every box in a mixed-arch fleet.
+Modular Zig 0.16 codebase under `src/` (~1100 lines total), no dependencies
+beyond libc, static binaries for every box in a mixed-arch fleet.
 
 ```
 $ looper ls
@@ -33,11 +33,11 @@ here maps to one of them:
 
 ## Install
 
-The tool is a single source file. Build it with Zig 0.16+ (only libc is needed):
+Build it with Zig 0.16+ (only libc is needed):
 
 ```sh
-zig build-exe main.zig -O ReleaseSafe -lc -femit-bin=looper
-install -m755 looper ~/.local/bin/looper
+zig build -Doptimize=ReleaseSafe
+install -m755 zig-out/bin/looper ~/.local/bin/looper
 ```
 
 Or use a prebuilt binary from this folder:
@@ -52,9 +52,9 @@ Or use a prebuilt binary from this folder:
 Zig cross-compiles from any host. To rebuild every target:
 
 ```sh
-zig build-exe main.zig -O ReleaseSafe -lc -target x86_64-linux-musl  -femit-bin=looper-x86_64-linux-musl
-zig build-exe main.zig -O ReleaseSafe -lc -target aarch64-linux-musl -femit-bin=looper-aarch64-linux-musl
-zig build-exe main.zig -O ReleaseSafe -lc -target aarch64-macos      -femit-bin=looper-aarch64-macos
+zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl
+zig build -Doptimize=ReleaseSafe -Dtarget=aarch64-linux-musl
+zig build -Doptimize=ReleaseSafe -Dtarget=aarch64-macos
 ```
 
 The `*-linux-musl` builds are statically linked — copy them to a Pi and run,
@@ -226,12 +226,22 @@ deploy@web1
   failed, bad schedule), `2` usage error. `run` propagates the job's own exit code.
 - Honors `NO_COLOR`, `--no-color`, and non-tty output (color off automatically).
 
-## Building/testing the cron engine
+## Building & testing
+
+The codebase is organized under `src/` with three subdirectories:
+
+- `src/cron/` — schedule parser, next-run calculator, humanizer, NLP front-end
+- `src/crontab/` — file model, target backends (local/ssh/file), backup snapshots
+- `src/ui/` — terminal display, diff renderer, help screen
 
 The schedule parser, next-run calculator (DST-correct via libc `localtime_r`/
-`mktime`), and the Vixie DOM/DOW OR-rule are covered by unit tests in
-`cronlogic.zig`:
+`mktime`), and the Vixie DOM/DOW OR-rule are covered by inline unit tests
+colocated with each module. Run them with:
 
 ```sh
-zig test cronlogic.zig -lc
+zig build test
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE).

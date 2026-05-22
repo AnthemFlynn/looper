@@ -1,0 +1,56 @@
+//! Help screen and version constant.
+const std = @import("std");
+const ctx_mod = @import("../ctx.zig");
+
+pub const VERSION = "1.0.0";
+
+pub fn printHelp(ctx: *ctx_mod.Ctx) void {
+    const B = ctx.k(ctx_mod.BOLD);
+    const R = ctx.k(ctx_mod.RESET);
+    const D = ctx.k(ctx_mod.DIM);
+    ctx.emit("{s}looper{s} {s}1.0.0{s}  manage cron jobs, one or many, local or over ssh.\n\n", .{ B, R, D, R });
+    ctx.emit("{s}USAGE{s}\n", .{ B, R });
+    ctx.emit("  looper <command> [arguments] [options]\n", .{});
+    ctx.emit("\n", .{});
+    ctx.emit("{s}COMMANDS{s}\n", .{ B, R });
+    ctx.emit("  ls                        List jobs with their next run times\n", .{});
+    ctx.emit("  add <schedule> <command>  Add or update a job (idempotent; name with --id)\n", .{});
+    ctx.emit("  rm <id|fN>...             Remove job(s): by id, or unmanaged ones by fN handle\n", .{});
+    ctx.emit("  enable <id>...            Re-enable a disabled job\n", .{});
+    ctx.emit("  disable <id>...           Pause a job, keeping its definition\n", .{});
+    ctx.emit("  show <id>                 Explain a job: meaning + next 5 run times\n", .{});
+    ctx.emit("  run <id>                  Run a job's command now, streaming output\n", .{});
+    ctx.emit("  explain <schedule>        Describe a schedule (cron or English; no changes)\n", .{});
+    ctx.emit("  import                    Adopt existing, unmanaged crontab jobs\n", .{});
+    ctx.emit("  backup                    Snapshot the crontab to the state directory\n", .{});
+    ctx.emit("  restore [file]            Roll back to the newest (or named) snapshot\n", .{});
+    ctx.emit("  help, version\n", .{});
+    ctx.emit("\n", .{});
+    ctx.emit("{s}TARGET{s} {s}(default: your own local crontab){s}\n", .{ B, R, D, R });
+    ctx.emit("  -H, --host <[user@]host>  A remote host via ssh (repeatable)\n", .{});
+    ctx.emit("      --all                 Every host in ~/.config/looper/hosts\n", .{});
+    ctx.emit("  -u, --user <name>         Another user's crontab\n", .{});
+    ctx.emit("  -f, --file <path>         A crontab file (handy for git)\n", .{});
+    ctx.emit("\n", .{});
+    ctx.emit("{s}OPTIONS{s}\n", .{ B, R });
+    ctx.emit("      --dry-run             Show the change as a diff; write nothing\n", .{});
+    ctx.emit("  -y, --yes                 Skip confirmation prompts\n", .{});
+    ctx.emit("      --json                Machine-readable output (for ls)\n", .{});
+    ctx.emit("  -q, --quiet               Print only errors\n", .{});
+    ctx.emit("      --no-color            Disable color (also obeys NO_COLOR)\n", .{});
+    ctx.emit("  -h, --help                Show this help\n", .{});
+    ctx.emit("\n", .{});
+    ctx.emit("{s}SCHEDULES{s} {s}- cron, a macro, or plain English, all stored as standard cron{s}\n", .{ B, R, D, R });
+    ctx.emit("    cron                    */15 9-17 * * mon-fri\n", .{});
+    ctx.emit("    macro                   @yearly @monthly @weekly @daily @hourly @reboot\n", .{});
+    ctx.emit("    english                 \"every weekday at 9:30am\", \"at noon on sundays\"\n", .{});
+    ctx.emit("\n", .{});
+    ctx.emit("{s}EXAMPLES{s}\n", .{ B, R });
+    ctx.emit("  {s}  {s}# nightly at 3am{s}\n", .{ "looper add \"0 3 * * *\" backup.sh              ", D, R });
+    ctx.emit("  {s}  {s}# plain English{s}\n", .{ "looper add \"every weekday at 8am\" report.sh   ", D, R });
+    ctx.emit("  {s}  {s}# preview, no changes{s}\n", .{ "looper explain \"at noon on weekends\"          ", D, R });
+    ctx.emit("  {s}  {s}# remove an unmanaged job (see ls){s}\n", .{ "looper rm f1                                  ", D, R });
+    ctx.emit("  {s}  {s}# every host in the fleet{s}\n", .{ "looper --all ls                               ", D, R });
+    ctx.emit("\n", .{});
+    ctx.emit("Every change is backed up first; there is deliberately no \"delete everything\".\n", .{});
+}
