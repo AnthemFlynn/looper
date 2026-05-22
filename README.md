@@ -74,7 +74,10 @@ Commands
   run <id>                 run a job's command right now (streamed output)
   explain <schedule>       explain a cron expression + next runs (writes nothing)
   import                   adopt existing unmanaged jobs into looper
-  backup / restore [file]  snapshot / roll back (restore also auto-backs-up)
+  backup                   snapshot the current crontab
+  backups                  list snapshots (newest first; size + age)
+  backups prune --keep N   remove older snapshots, keep the newest N
+  restore [file|--from S]  roll back to the newest, a named file, or a stamp
   version | help
 
 Target (default: your local crontab)
@@ -200,9 +203,25 @@ Before every change, the current crontab is snapshotted to:
 ${XDG_STATE_HOME:-~/.local/state}/looper/backups/<target>/<UTC-timestamp>.crontab
 ```
 
-`looper restore` rolls back to the newest snapshot (or a path you name) — and
-because restore is itself a mutation, it backs up first too. Nothing is ever
-unrecoverable.
+Snapshots are managed with three verbs:
+
+```sh
+looper backups                       # list newest-first: stamp, size, age
+looper restore                       # roll back to the newest snapshot
+looper restore --from 20260521       # roll back to a specific snapshot
+                                     #   (full stamp OR unambiguous substring)
+looper backups prune --keep 20       # keep the newest 20, remove the rest
+```
+
+`restore` is itself a mutation, so it auto-backs-up first — nothing is ever
+unrecoverable. `prune` will refuse `--keep 0` (it would wipe every snapshot)
+and prompts for confirmation unless run with `--yes`; pair with `--dry-run`
+to preview the exact list of stamps that would be removed.
+
+`--from` accepts the full 16-char stamp (`20260521T180000Z`) or any
+unambiguous substring (`20260521`). If a substring matches more than one
+snapshot, looper refuses rather than silently picking one — run `looper
+backups` and narrow the input.
 
 ## `--all` host list
 

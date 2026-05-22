@@ -24,6 +24,16 @@ pub const ParsedArgs = struct {
     /// arguments, not global UI toggles.
     new_schedule: ?[]const u8,
     new_command: ?[]const u8,
+    /// `restore --from <stamp>`: a full or substring backup stamp. The
+    /// command resolves it against the target's backup directory via
+    /// `findByStamp`. Mutually exclusive with the positional path; we
+    /// surface that conflict in `cmdRestore`.
+    from_stamp: ?[]const u8,
+    /// `backups prune --keep <N>`: number of newest backups to retain.
+    /// `null` means the flag wasn't supplied; `prune` rejects that with
+    /// a usage error rather than picking a default that might delete
+    /// more than the user expected.
+    keep: ?usize,
     force_help: bool,
     /// Set to the offending arg when an unknown option (e.g. `--frob`)
     /// is encountered. Parsing stops at the first unknown option so
@@ -48,6 +58,8 @@ pub fn parseArgv(a: std.mem.Allocator, argv: []const []const u8, ctx: *ctx_mod.C
         .want_id = null,
         .new_schedule = null,
         .new_command = null,
+        .from_stamp = null,
+        .keep = null,
         .force_help = false,
         .bad_option = null,
     };
@@ -90,6 +102,27 @@ pub fn parseArgv(a: std.mem.Allocator, argv: []const []const u8, ctx: *ctx_mod.C
         if (std.mem.eql(u8, arg, "--command")) {
             i += 1;
             if (i < argv.len) p.new_command = argv[i];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--from")) {
+            i += 1;
+            if (i < argv.len) p.from_stamp = argv[i];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--keep")) {
+            i += 1;
+            if (i < argv.len) {
+                // Reject non-integer values up-front so `--keep abc` is a
+                // hard argv error rather than something the `prune` path
+                // has to recover from. Out-of-range or negative values
+                // are also surfaced here.
+                p.keep = std.fmt.parseInt(usize, argv[i], 10) catch {
+                    p.bad_option = argv[i];
+                    p.positionals = try positionals.toOwnedSlice(a);
+                    p.hosts = try hosts.toOwnedSlice(a);
+                    return p;
+                };
+            }
             continue;
         }
         // Boolean flags.
@@ -267,6 +300,35 @@ test "parseArgv --command alone" {
     try testing.expect(p.new_schedule == null);
 }
 
+test "parseArgv --from captures stamp argument" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = newCtx(arena.allocator());
+    const argv = [_][]const u8{ "looper", "restore", "--from", "20260522T093015Z" };
+    const p = try parseArgv(arena.allocator(), &argv, &ctx);
+    try testing.expectEqualStrings("20260522T093015Z", p.from_stamp.?);
+}
+
+test "parseArgv --keep N parses to usize" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = newCtx(arena.allocator());
+    const argv = [_][]const u8{ "looper", "backups", "prune", "--keep", "20" };
+    const p = try parseArgv(arena.allocator(), &argv, &ctx);
+    try testing.expectEqual(@as(usize, 20), p.keep.?);
+}
+
+test "parseArgv --keep with non-numeric value sets bad_option" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = newCtx(arena.allocator());
+    const argv = [_][]const u8{ "looper", "backups", "prune", "--keep", "abc" };
+    const p = try parseArgv(arena.allocator(), &argv, &ctx);
+    try testing.expect(p.bad_option != null);
+    try testing.expectEqualStrings("abc", p.bad_option.?);
+    try testing.expect(p.keep == null);
+}
+
 test "parseArgv both --schedule and --command" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -335,6 +397,8 @@ test "buildTargets default = local" {
         .want_id = null,
         .new_schedule = null,
         .new_command = null,
+        .from_stamp = null,
+        .keep = null,
         .force_help = false,
         .bad_option = null,
     };
@@ -355,6 +419,8 @@ test "buildTargets file path → one file target" {
         .want_id = null,
         .new_schedule = null,
         .new_command = null,
+        .from_stamp = null,
+        .keep = null,
         .force_help = false,
         .bad_option = null,
     };
@@ -377,6 +443,8 @@ test "buildTargets -H hosts → one remote per host, sharing user" {
         .want_id = null,
         .new_schedule = null,
         .new_command = null,
+        .from_stamp = null,
+        .keep = null,
         .force_help = false,
         .bad_option = null,
     };
@@ -399,6 +467,8 @@ test "buildTargets --all parses hosts file, ignores blank/comment lines" {
         .want_id = null,
         .new_schedule = null,
         .new_command = null,
+        .from_stamp = null,
+        .keep = null,
         .force_help = false,
         .bad_option = null,
     };
@@ -429,6 +499,8 @@ test "buildTargets --all empty hosts file → empty list" {
         .want_id = null,
         .new_schedule = null,
         .new_command = null,
+        .from_stamp = null,
+        .keep = null,
         .force_help = false,
         .bad_option = null,
     };
@@ -448,6 +520,8 @@ test "buildTargets --all + -u applies user to every remote" {
         .want_id = null,
         .new_schedule = null,
         .new_command = null,
+        .from_stamp = null,
+        .keep = null,
         .force_help = false,
         .bad_option = null,
     };

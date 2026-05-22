@@ -12,7 +12,7 @@ const colors = @import("ui/colors.zig");
 const target_mod = @import("crontab/target.zig");
 const tz_mod = @import("tz.zig");
 
-const Cmd = enum { ls, add, edit, rm, enable, disable, show, run, explain, import, backup, restore, doctor, version, help, unknown };
+const Cmd = enum { ls, add, edit, rm, enable, disable, show, run, explain, import, backup, backups, restore, doctor, version, help, unknown };
 
 fn parseCmd(s: []const u8) Cmd {
     // Note: `set` aliases `edit` (the partial-update command), not `add`.
@@ -20,12 +20,17 @@ fn parseCmd(s: []const u8) Cmd {
     // it to `edit` makes the natural reading "set the schedule of X to
     // Y" do the smarter thing — no positional re-statement of the other
     // field, so the command users don't want to change can't drift.
+    //
+    // `backup` (singular) creates one snapshot; `backups` (plural) lists
+    // them or, with the `prune` subcommand, removes older ones. The two
+    // are distinct verbs by design — `backup` is the side-effect, and
+    // `backups` is the inventory.
     const map = .{
         .{ "ls", Cmd.ls },           .{ "list", Cmd.ls },         .{ "add", Cmd.add },         .{ "edit", Cmd.edit },
         .{ "set", Cmd.edit },        .{ "rm", Cmd.rm },           .{ "remove", Cmd.rm },       .{ "delete", Cmd.rm },
         .{ "enable", Cmd.enable },   .{ "disable", Cmd.disable }, .{ "show", Cmd.show },       .{ "run", Cmd.run },
-        .{ "explain", Cmd.explain }, .{ "import", Cmd.import },   .{ "backup", Cmd.backup },   .{ "restore", Cmd.restore },
-        .{ "doctor", Cmd.doctor },   .{ "version", Cmd.version }, .{ "help", Cmd.help },
+        .{ "explain", Cmd.explain }, .{ "import", Cmd.import },   .{ "backup", Cmd.backup },   .{ "backups", Cmd.backups },
+        .{ "restore", Cmd.restore }, .{ "doctor", Cmd.doctor },   .{ "version", Cmd.version }, .{ "help", Cmd.help },
     };
     inline for (map) |e| if (std.mem.eql(u8, s, e[0])) return e[1];
     return .unknown;
@@ -194,7 +199,27 @@ pub fn main(init: std.process.Init.Minimal) !void {
             },
             .import => try cmds.cmdImport(&ctx, t, content),
             .backup => try cmds.cmdBackup(&ctx, t, content),
-            .restore => try cmds.cmdRestore(&ctx, t, content, if (rest.len > 0) rest[0] else null),
+            .backups => {
+                // Subcommand split: `backups` alone is the listing; `backups
+                // prune` is the only mutator and demands --keep. Anything
+                // else under `backups <x>` is a usage error (so we don't
+                // silently treat a typo as a list request).
+                if (rest.len == 0) {
+                    try cmds.cmdBackups(&ctx, t);
+                } else if (std.mem.eql(u8, rest[0], "prune")) {
+                    const keep = parsed.keep orelse {
+                        posix.eprint("looper: 'backups prune' needs --keep <N> (e.g. 'looper backups prune --keep 20')\n", .{});
+                        ctx.fail(2);
+                        break;
+                    };
+                    try cmds.cmdBackupsPrune(&ctx, t, keep);
+                } else {
+                    posix.eprint("looper: unknown backups subcommand '{s}' (try: looper backups, looper backups prune --keep N)\n", .{rest[0]});
+                    ctx.fail(2);
+                    break;
+                }
+            },
+            .restore => try cmds.cmdRestore(&ctx, t, content, if (rest.len > 0) rest[0] else null, parsed.from_stamp),
             else => {},
         }
         if (visual_multi) ctx.emit("\n", .{});

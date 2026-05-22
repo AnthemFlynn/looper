@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`looper` is a Zig 0.16 CLI that manages cron jobs — locally, for another user, on remote hosts over `ssh`, or in a plain crontab file. The source lives under `src/` (~1900 lines across 18 modules), libc-only, no third-party dependencies. Built with `build.zig` (`zig build`); cross-targets are passed via `-Dtarget=...`.
+`looper` is a Zig 0.16 CLI that manages cron jobs — locally, for another user, on remote hosts over `ssh`, or in a plain crontab file. The source lives under `src/` (~2100 lines across 18 modules), libc-only, no third-party dependencies. Built with `build.zig` (`zig build`); cross-targets are passed via `-Dtarget=...`.
 
 ## Build & run
 
@@ -38,7 +38,7 @@ src/
   crontab/
     model.zig             MARKER, Job, Item, Crontab, parseCrontab, serialize, splitScheduleCommand
     target.zig            Target/TargetKind + readCrontab/writeCrontab + readCrontabAndTz (sentinel-split)
-    backup.zig            doBackup, newestBackup, stateDir, backupDir, utcStamp, mkdirP
+    backup.zig            doBackup, newestBackup, listBackups, findByStamp, pruneBackups, stateDir, backupDir, utcStamp, mkdirP
   ui/
     colors.zig            ANSI escape constants (BOLD/DIM/RED/…); consumed via ctx.k(CODE)
     display.zig           padTo, truncEllipsis, jsonEsc, termWidth, slugFromCommand, confirm
@@ -60,7 +60,8 @@ Inline `test "..." { ... }` blocks colocated at the bottom of each module. `zig 
 - **Idempotency by `id`.** `add` with an existing id updates in place (full re-statement of schedule + command); never appends a duplicate. For changing only one field — schedule OR command — use `edit <id> --schedule X` / `--command Y` so the unchanged field can't drift.
 - **`set` aliases `edit`, not `add`.** Historical: `set` was an undocumented alias for `add`. Reassigned because the natural reading of "set the schedule of X" is the partial-update semantics, which is also less error-prone (no re-statement of the other field).
 - **`--json` is a stable contract.** Field names use snake_case; missing values are `null` (never `0`, never `""`); `tz_source` uses the canonical names from `tz.sourceStr` rather than `@tagName` so refactors don't break consumers. Multi-target JSON emits one document per target with each carrying its own `target` field — the `=== host ===` headers are suppressed under `--json`. Diff ops use `"context"`/`"remove"`/`"add"` from `diff.opName`. Adding fields is fine; renaming or removing is a breaking change.
-- **No "remove all" command exists, by design.** `crontab -r` is the footgun this tool exists to avoid.
+- **No "remove all" command exists, by design.** `crontab -r` is the footgun this tool exists to avoid. The same rule applies to `backups prune`: `--keep 0` is rejected up-front, so a stray flag can't sweep every snapshot. Pruning always confirms (or honors `-y`/`--yes`), and `--dry-run` previews without unlinking.
+- **`backup` (singular) creates a snapshot; `backups` (plural) is the inventory.** Lists newest-first by lex-sortable UTC stamp. `backups prune --keep N` removes the rest. `restore --from <stamp>` resolves a full or substring stamp via `findByStamp` and is mutually exclusive with the positional path argument. Substring matches that hit more than one snapshot are an error, not a "pick the first one" — the caller must narrow the input.
 - **Disabled jobs keep their definition.** `disable` comments the payload line but leaves the marker (`enabled=0`); do not delete on disable.
 - **Color is opt-in to a tty and `NO_COLOR`.** Use `ctx.k(CODE)` rather than hardcoding escape sequences so `--no-color` / `NO_COLOR` keep working.
 - **Output goes through `ctx.emit` + `ctx.flush`,** not direct stdio. Errors go through `posix.eprint`. `Ctx.exit_code` + `ctx.fail(code)` accumulate non-fatal failures (first-failure-wins) so a multi-target run still surfaces a non-zero exit.
