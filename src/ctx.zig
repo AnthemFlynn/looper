@@ -4,15 +4,7 @@
 const std = @import("std");
 const posix = @import("posix.zig");
 const c = posix.c;
-
-pub const RESET = "\x1b[0m";
-pub const BOLD = "\x1b[1m";
-pub const DIM = "\x1b[2m";
-pub const RED = "\x1b[31m";
-pub const GREEN = "\x1b[32m";
-pub const YELLOW = "\x1b[33m";
-pub const BLUE = "\x1b[34m";
-pub const CYAN = "\x1b[36m";
+const colors = @import("ui/colors.zig");
 
 pub const Ctx = struct {
     a: std.mem.Allocator,
@@ -65,9 +57,9 @@ test "Ctx.k returns empty string when color off" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var ctx = Ctx{ .a = arena.allocator(), .color = false };
-    try testing.expectEqualStrings("", ctx.k(RED));
+    try testing.expectEqualStrings("", ctx.k(colors.RED));
     ctx.color = true;
-    try testing.expectEqualStrings(RED, ctx.k(RED));
+    try testing.expectEqualStrings(colors.RED, ctx.k(colors.RED));
 }
 
 test "Ctx.emit appends to buf" {

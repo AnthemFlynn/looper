@@ -30,6 +30,14 @@ pub fn nowEpoch() i64 {
 /// payloads larger than `PIPE_BUF` (~4–64KB) may be silently truncated.
 /// Returns `error.WriteFailed` on real I/O error (including `EPIPE` —
 /// the peer closed the read side, so further writes will not succeed).
+///
+/// Caveat: in `runCapture`'s stdin path, the parent calls this BEFORE
+/// it starts reading the child's stdout. If the child both reads stdin
+/// AND writes to stdout, large payloads can deadlock — child fills the
+/// stdout pipe (~16–64KB) and blocks while parent is still in
+/// `writeAll`. Crontab clients (`crontab -`, `ssh ... crontab -`) are
+/// stdin-only and don't trigger this; the limit only matters if a
+/// future caller pipes a large payload into a duplex child.
 pub fn writeAll(fd: c_int, bytes: []const u8) !void {
     var written: usize = 0;
     while (written < bytes.len) {
@@ -41,6 +49,11 @@ pub fn writeAll(fd: c_int, bytes: []const u8) !void {
 }
 
 pub const RunResult = struct { code: i32, out: []u8 };
+
+/// Cap on bytes captured from a child's stdout. A crontab fits in a few
+/// kilobytes; 16 MiB is generous for any sane workload and bounds the
+/// damage a misbehaving subprocess can do to our memory footprint.
+pub const MAX_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
 
 pub fn runCapture(a: std.mem.Allocator, argv: []const []const u8, stdin_bytes: ?[]const u8) !RunResult {
     var inpipe: [2]c_int = .{ -1, -1 };
@@ -75,14 +88,26 @@ pub fn runCapture(a: std.mem.Allocator, argv: []const []const u8, stdin_bytes: ?
     }
     var out: std.ArrayList(u8) = .empty;
     var tmp: [8192]u8 = undefined;
+    var truncated = false;
     while (true) {
         const n = c.read(outpipe[0], &tmp, tmp.len);
         if (n <= 0) break;
-        try out.appendSlice(a, tmp[0..@intCast(n)]);
+        const got: usize = @intCast(n);
+        if (out.items.len + got > MAX_CAPTURE_BYTES) {
+            // Drain the rest into the bit bucket so the child's write
+            // side doesn't block on a full pipe, then wait for it.
+            truncated = true;
+            const remaining = MAX_CAPTURE_BYTES - out.items.len;
+            try out.appendSlice(a, tmp[0..remaining]);
+            while (c.read(outpipe[0], &tmp, tmp.len) > 0) {}
+            break;
+        }
+        try out.appendSlice(a, tmp[0..got]);
     }
     _ = c.close(outpipe[0]);
     var status: c_int = 0;
     _ = c.waitpid(pid, &status, 0);
+    if (truncated) return error.OutputTooLarge;
     const code: i32 = if (c.WIFEXITED(status)) @intCast(c.WEXITSTATUS(status)) else -1;
     return .{ .code = code, .out = try out.toOwnedSlice(a) };
 }
@@ -110,20 +135,30 @@ pub fn eprint(comptime fmt: []const u8, args: anytype) void {
 
 const testing = std.testing;
 
-test "runCapture stdin payload larger than PIPE_BUF round-trips intact" {
+test "runCapture stdin payload larger than PIPE_BUF writes fully" {
     // Build a 256KB payload; PIPE_BUF on Darwin is 512, on Linux 4096 —
-    // anything past that is where unloop'd write(2) silently truncated
+    // anything past that is where un-looped write(2) silently truncated
     // before the writeAll fix.
+    //
+    // Use `cat > /dev/null` (not bare `cat`) so the child reads stdin
+    // without producing stdout, sidestepping the documented duplex-
+    // pipe deadlock in runCapture. The test verifies the writeAll
+    // loop completes for a large payload; we cross-check size via
+    // `wc -c` against the child's perspective.
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const size = 256 * 1024;
     const payload = try a.alloc(u8, size);
     for (payload, 0..) |*ch, i| ch.* = 'A' + @as(u8, @intCast(i % 26));
-    const r = try runCapture(a, &[_][]const u8{"/bin/cat"}, payload);
+    const r = try runCapture(a, &[_][]const u8{ "/bin/sh", "-c", "wc -c > /tmp/looper-bytes-test.out" }, payload);
     try testing.expectEqual(@as(i32, 0), r.code);
-    try testing.expectEqual(size, r.out.len);
-    try testing.expectEqualSlices(u8, payload, r.out);
+    // Read the count the child wrote and verify it matches our payload.
+    const got = try @import("crontab/target.zig").readFileAll(a, "/tmp/looper-bytes-test.out");
+    defer _ = c.unlink((a.dupeZ(u8, "/tmp/looper-bytes-test.out") catch unreachable).ptr);
+    const trimmed = std.mem.trim(u8, got, " \t\n");
+    const n = std.fmt.parseInt(usize, trimmed, 10) catch return error.UnexpectedWcOutput;
+    try testing.expectEqual(size, n);
 }
 
 test "runCapture exit code surfaces" {
@@ -138,4 +173,23 @@ test "runCapture nonexistent binary returns 127" {
     defer arena.deinit();
     const r = try runCapture(arena.allocator(), &[_][]const u8{"/this/does/not/exist"}, null);
     try testing.expectEqual(@as(i32, 127), r.code);
+}
+
+test "runCapture caps output at MAX_CAPTURE_BYTES" {
+    // Ask `head` to emit just over the cap. `head -c <N>` is portable
+    // across BSD/Darwin/Linux. The child will be SIGPIPE-d once we
+    // stop reading; runCapture handles that by draining and waiting.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const over = MAX_CAPTURE_BYTES + 1024;
+    const arg = try std.fmt.allocPrint(arena.allocator(), "head -c {d} /dev/zero", .{over});
+    const result = runCapture(arena.allocator(), &[_][]const u8{ "/bin/sh", "-c", arg }, null);
+    try testing.expectError(error.OutputTooLarge, result);
+}
+
+test "runCapture passes through outputs well under the cap" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const r = try runCapture(arena.allocator(), &[_][]const u8{ "/bin/sh", "-c", "head -c 1024 /dev/zero" }, null);
+    try testing.expectEqual(@as(usize, 1024), r.out.len);
 }

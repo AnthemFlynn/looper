@@ -37,6 +37,22 @@ pub const Target = struct {
 
 pub const BackendError = error{ Unavailable, WriteFailed };
 
+/// Common ssh argv prefix for every remote invocation:
+///   ssh -o BatchMode=yes -o ConnectTimeout=10 <host>
+/// BatchMode prevents interactive credential prompts that would hang a
+/// non-tty invocation; ConnectTimeout caps fleet runs against dead hosts
+/// at ~10s per target instead of the OS default (often 60-120s).
+pub fn sshArgvPrefix(a: std.mem.Allocator, host: []const u8) ![][]const u8 {
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.append(a, "ssh");
+    try argv.append(a, "-o");
+    try argv.append(a, "BatchMode=yes");
+    try argv.append(a, "-o");
+    try argv.append(a, "ConnectTimeout=10");
+    try argv.append(a, host);
+    return argv.toOwnedSlice(a);
+}
+
 pub fn readFileAll(a: std.mem.Allocator, path: []const u8) ![]u8 {
     const pz = try a.dupeZ(u8, path);
     const fd = c.open(pz.ptr, c.O_RDONLY);
@@ -79,12 +95,7 @@ pub fn readCrontab(a: std.mem.Allocator, t: Target) ![]u8 {
         },
         .remote => {
             var argv: std.ArrayList([]const u8) = .empty;
-            try argv.append(a, "ssh");
-            try argv.append(a, "-o");
-            try argv.append(a, "BatchMode=yes");
-            try argv.append(a, "-o");
-            try argv.append(a, "ConnectTimeout=10");
-            try argv.append(a, t.host);
+            try argv.appendSlice(a, try sshArgvPrefix(a, t.host));
             try argv.append(a, "crontab");
             if (t.user.len > 0) {
                 try argv.append(a, "-u");
@@ -121,12 +132,7 @@ pub fn writeCrontab(a: std.mem.Allocator, t: Target, data: []const u8) !void {
         },
         .remote => {
             var argv: std.ArrayList([]const u8) = .empty;
-            try argv.append(a, "ssh");
-            try argv.append(a, "-o");
-            try argv.append(a, "BatchMode=yes");
-            try argv.append(a, "-o");
-            try argv.append(a, "ConnectTimeout=10");
-            try argv.append(a, t.host);
+            try argv.appendSlice(a, try sshArgvPrefix(a, t.host));
             try argv.append(a, "crontab");
             if (t.user.len > 0) {
                 try argv.append(a, "-u");
@@ -137,4 +143,37 @@ pub fn writeCrontab(a: std.mem.Allocator, t: Target, data: []const u8) !void {
             if (r.code != 0) return BackendError.WriteFailed;
         },
     }
+}
+
+const testing = std.testing;
+
+test "sshArgvPrefix produces canonical batch-safe argv" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const argv = try sshArgvPrefix(arena.allocator(), "pi@nas");
+    try testing.expectEqual(@as(usize, 6), argv.len);
+    try testing.expectEqualStrings("ssh", argv[0]);
+    try testing.expectEqualStrings("-o", argv[1]);
+    try testing.expectEqualStrings("BatchMode=yes", argv[2]);
+    try testing.expectEqualStrings("-o", argv[3]);
+    try testing.expectEqualStrings("ConnectTimeout=10", argv[4]);
+    try testing.expectEqualStrings("pi@nas", argv[5]);
+}
+
+test "Target.slug sanitizes non-alphanumeric chars" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const t1: Target = .{ .kind = .remote, .host = "pi@nas.local" };
+    try testing.expectEqualStrings("pi_nas.local", t1.slug(arena.allocator()));
+    const t2: Target = .{ .kind = .local, .user = "ops" };
+    try testing.expectEqualStrings("local__ops", t2.slug(arena.allocator()));
+}
+
+test "Target.label distinguishes the three kinds" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings("local", (Target{ .kind = .local }).label(a));
+    try testing.expectEqualStrings("nas", (Target{ .kind = .remote, .host = "nas" }).label(a));
+    try testing.expectEqualStrings("file:/tmp/x", (Target{ .kind = .file, .path = "/tmp/x" }).label(a));
 }

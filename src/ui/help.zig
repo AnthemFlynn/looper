@@ -1,13 +1,14 @@
 //! Help screen and version constant.
 const std = @import("std");
 const ctx_mod = @import("../ctx.zig");
+const colors = @import("colors.zig");
 
 pub const VERSION = "1.0.0";
 
 pub fn printHelp(ctx: *ctx_mod.Ctx) void {
-    const B = ctx.k(ctx_mod.BOLD);
-    const R = ctx.k(ctx_mod.RESET);
-    const D = ctx.k(ctx_mod.DIM);
+    const B = ctx.k(colors.BOLD);
+    const R = ctx.k(colors.RESET);
+    const D = ctx.k(colors.DIM);
     ctx.emit("{s}looper{s} {s}1.0.0{s}  manage cron jobs, one or many, local or over ssh.\n\n", .{ B, R, D, R });
     ctx.emit("{s}USAGE{s}\n", .{ B, R });
     ctx.emit("  looper <command> [arguments] [options]\n", .{});

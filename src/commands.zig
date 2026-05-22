@@ -13,17 +13,18 @@ const humanize = @import("cron/humanize.zig");
 const nlp = @import("cron/nlp.zig");
 const display = @import("ui/display.zig");
 const diff = @import("ui/diff.zig");
+const colors = @import("ui/colors.zig");
 
 const Ctx = ctx_mod.Ctx;
 const Target = target_mod.Target;
 
 pub fn applyMutation(ctx: *Ctx, t: Target, content: []const u8, new_content: []const u8, verb: []const u8) !void {
     if (std.mem.eql(u8, content, new_content)) {
-        if (!ctx.quiet) ctx.emit("{s}no change{s} on {s}\n", .{ ctx.k(ctx_mod.DIM), ctx.k(ctx_mod.RESET), t.label(ctx.a) });
+        if (!ctx.quiet) ctx.emit("{s}no change{s} on {s}\n", .{ ctx.k(colors.DIM), ctx.k(colors.RESET), t.label(ctx.a) });
         return;
     }
     if (ctx.dry_run) {
-        ctx.emit("{s}# dry-run: {s} on {s} (nothing written){s}\n", .{ ctx.k(ctx_mod.YELLOW), verb, t.label(ctx.a), ctx.k(ctx_mod.RESET) });
+        ctx.emit("{s}# dry-run: {s} on {s} (nothing written){s}\n", .{ ctx.k(colors.YELLOW), verb, t.label(ctx.a), ctx.k(colors.RESET) });
         diff.printDiff(ctx, content, new_content);
         return;
     }
@@ -34,8 +35,8 @@ pub fn applyMutation(ctx: *Ctx, t: Target, content: []const u8, new_content: []c
         return;
     };
     if (!ctx.quiet) {
-        ctx.emit("{s}\xe2\x9c\x93{s} {s} on {s}", .{ ctx.k(ctx_mod.GREEN), ctx.k(ctx_mod.RESET), verb, t.label(ctx.a) });
-        if (bpath) |bp| ctx.emit("{s}  (backup: {s}){s}", .{ ctx.k(ctx_mod.DIM), bp, ctx.k(ctx_mod.RESET) });
+        ctx.emit("{s}\xe2\x9c\x93{s} {s} on {s}", .{ ctx.k(colors.GREEN), ctx.k(colors.RESET), verb, t.label(ctx.a) });
+        if (bpath) |bp| ctx.emit("{s}  (backup: {s}){s}", .{ ctx.k(colors.DIM), bp, ctx.k(colors.RESET) });
         ctx.emit("\n", .{});
     }
 }
@@ -69,12 +70,12 @@ pub fn cmdLs(ctx: *Ctx, t: Target, content: []const u8) !void {
         else => {},
     };
     if (managed == 0 and foreign == 0) {
-        ctx.emit("{s}no cron jobs on {s}{s}\n", .{ ctx.k(ctx_mod.DIM), t.label(ctx.a), ctx.k(ctx_mod.RESET) });
+        ctx.emit("{s}no cron jobs on {s}{s}\n", .{ ctx.k(colors.DIM), t.label(ctx.a), ctx.k(colors.RESET) });
         return;
     }
     const w = display.termWidth();
     const cmd_w = if (w > 60) w - 56 else 24;
-    ctx.emit("{s}{s}{s}{s}   {s}{s}\n", .{ ctx.k(ctx_mod.BOLD), display.padTo(ctx.a, "ID", 14), display.padTo(ctx.a, "SCHEDULE", 22), display.padTo(ctx.a, "NEXT RUN", 24), "COMMAND", ctx.k(ctx_mod.RESET) });
+    ctx.emit("{s}{s}{s}{s}   {s}{s}\n", .{ ctx.k(colors.BOLD), display.padTo(ctx.a, "ID", 14), display.padTo(ctx.a, "SCHEDULE", 22), display.padTo(ctx.a, "NEXT RUN", 24), "COMMAND", ctx.k(colors.RESET) });
     var fcount: usize = 0;
     for (ct.items.items) |it| switch (it) {
         .job => |j| {
@@ -84,19 +85,19 @@ pub fn cmdLs(ctx: *Ctx, t: Target, content: []const u8) !void {
                 fcount += 1;
                 break :blk std.fmt.allocPrint(ctx.a, "f{d}", .{fcount}) catch "f?";
             } else j.id;
-            const idcolor = if (j.foreign) ctx.k(ctx_mod.YELLOW) else ctx.k(ctx_mod.CYAN);
-            const dotcolor = if (j.foreign) ctx.k(ctx_mod.YELLOW) else if (j.enabled) ctx.k(ctx_mod.GREEN) else ctx.k(ctx_mod.DIM);
+            const idcolor = if (j.foreign) ctx.k(colors.YELLOW) else ctx.k(colors.CYAN);
+            const dotcolor = if (j.foreign) ctx.k(colors.YELLOW) else if (j.enabled) ctx.k(colors.GREEN) else ctx.k(colors.DIM);
             const dot = if (j.foreign) "?" else if (j.enabled) "\xe2\x97\x8f" else "\xe2\x97\x8b";
             ctx.emit("{s}{s}{s}{s}{s}{s}{s} {s}{s}{s} {s}\n", .{
-                idcolor,                      display.padTo(ctx.a, idcol, 14),                ctx.k(ctx_mod.RESET),
-                ctx.k(ctx_mod.DIM),           display.padTo(ctx.a, j.schedule, 22),           ctx.k(ctx_mod.RESET),
+                idcolor,                      display.padTo(ctx.a, idcol, 14),                ctx.k(colors.RESET),
+                ctx.k(colors.DIM),           display.padTo(ctx.a, j.schedule, 22),           ctx.k(colors.RESET),
                 display.padTo(ctx.a, nr, 24), dotcolor,                                       dot,
-                ctx.k(ctx_mod.RESET),         display.truncEllipsis(ctx.a, j.command, cmd_w),
+                ctx.k(colors.RESET),         display.truncEllipsis(ctx.a, j.command, cmd_w),
             });
         },
         else => {},
     };
-    if (foreign > 0) ctx.emit("{s}\n{d} unmanaged job(s) shown as f1..f{d} — remove with 'looper rm f1', or adopt with 'looper import'{s}\n", .{ ctx.k(ctx_mod.DIM), foreign, foreign, ctx.k(ctx_mod.RESET) });
+    if (foreign > 0) ctx.emit("{s}\n{d} unmanaged job(s) shown as f1..f{d} — remove with 'looper rm f1', or adopt with 'looper import'{s}\n", .{ ctx.k(colors.DIM), foreign, foreign, ctx.k(colors.RESET) });
 }
 
 pub fn cmdAdd(ctx: *Ctx, t: Target, content: []const u8, schedule: []const u8, command: []const u8, want_id: ?[]const u8) !void {
@@ -113,7 +114,7 @@ pub fn cmdAdd(ctx: *Ctx, t: Target, content: []const u8, schedule: []const u8, c
         return;
     };
     if (!std.mem.eql(u8, cron, schedule))
-        ctx.emit("{s}interpreted{s} \"{s}\" as {s}{s}{s}  ({s})\n", .{ ctx.k(ctx_mod.DIM), ctx.k(ctx_mod.RESET), schedule, ctx.k(ctx_mod.BOLD), cron, ctx.k(ctx_mod.RESET), humanize.humanize(ctx.a, cron) });
+        ctx.emit("{s}interpreted{s} \"{s}\" as {s}{s}{s}  ({s})\n", .{ ctx.k(colors.DIM), ctx.k(colors.RESET), schedule, ctx.k(colors.BOLD), cron, ctx.k(colors.RESET), humanize.humanize(ctx.a, cron) });
     var ct = try model.parseCrontab(ctx.a, content);
     const id = want_id orelse blk: {
         for (ct.items.items) |it| switch (it) {
@@ -192,8 +193,8 @@ pub fn cmdShow(ctx: *Ctx, t: Target, content: []const u8, id: []const u8) !void 
         return;
     };
     const j = ct.items.items[idx].job;
-    ctx.emit("{s}{s}{s}{s}  {s}{s}{s}\n", .{ ctx.k(ctx_mod.BOLD), ctx.k(ctx_mod.CYAN), j.id, ctx.k(ctx_mod.RESET), if (j.enabled) ctx.k(ctx_mod.GREEN) else ctx.k(ctx_mod.DIM), if (j.enabled) "enabled" else "disabled", ctx.k(ctx_mod.RESET) });
-    ctx.emit("  schedule : {s}{s}{s}\n", .{ ctx.k(ctx_mod.DIM), j.schedule, ctx.k(ctx_mod.RESET) });
+    ctx.emit("{s}{s}{s}{s}  {s}{s}{s}\n", .{ ctx.k(colors.BOLD), ctx.k(colors.CYAN), j.id, ctx.k(colors.RESET), if (j.enabled) ctx.k(colors.GREEN) else ctx.k(colors.DIM), if (j.enabled) "enabled" else "disabled", ctx.k(colors.RESET) });
+    ctx.emit("  schedule : {s}{s}{s}\n", .{ ctx.k(colors.DIM), j.schedule, ctx.k(colors.RESET) });
     ctx.emit("  meaning  : {s}\n", .{humanize.humanize(ctx.a, j.schedule)});
     ctx.emit("  command  : {s}\n", .{j.command});
     ctx.emit("  target   : {s}\n", .{t.label(ctx.a)});
@@ -213,7 +214,7 @@ pub fn cmdShow(ctx: *Ctx, t: Target, content: []const u8, id: []const u8) !void 
         ctx.emit("    {s}\n", .{humanize.fmtWhen(ctx.a, nr)});
         from = nr;
     }
-    if (t.kind == .remote) ctx.emit("  {s}(next-run times use this machine's timezone){s}\n", .{ ctx.k(ctx_mod.DIM), ctx.k(ctx_mod.RESET) });
+    if (t.kind == .remote) ctx.emit("  {s}(next-run times use this machine's timezone){s}\n", .{ ctx.k(colors.DIM), ctx.k(colors.RESET) });
 }
 
 pub fn cmdRun(ctx: *Ctx, t: Target, content: []const u8, id: []const u8) !void {
@@ -224,16 +225,11 @@ pub fn cmdRun(ctx: *Ctx, t: Target, content: []const u8, id: []const u8) !void {
         return;
     };
     const cmd = ct.items.items[idx].job.command;
-    ctx.emit("{s}running '{s}' on {s}…{s}\n", .{ ctx.k(ctx_mod.DIM), id, t.label(ctx.a), ctx.k(ctx_mod.RESET) });
+    ctx.emit("{s}running '{s}' on {s}…{s}\n", .{ ctx.k(colors.DIM), id, t.label(ctx.a), ctx.k(colors.RESET) });
     ctx.flush();
     var argv: std.ArrayList([]const u8) = .empty;
     if (t.kind == .remote) {
-        try argv.append(ctx.a, "ssh");
-        try argv.append(ctx.a, "-o");
-        try argv.append(ctx.a, "BatchMode=yes");
-        try argv.append(ctx.a, "-o");
-        try argv.append(ctx.a, "ConnectTimeout=10");
-        try argv.append(ctx.a, t.host);
+        try argv.appendSlice(ctx.a, try target_mod.sshArgvPrefix(ctx.a, t.host));
         try argv.append(ctx.a, cmd);
     } else {
         try argv.append(ctx.a, "/bin/sh");
@@ -248,7 +244,7 @@ pub fn cmdRun(ctx: *Ctx, t: Target, content: []const u8, id: []const u8) !void {
         const u: u8 = if (code < 0 or code > 255) 1 else @intCast(code);
         ctx.fail(u);
     }
-    ctx.emit("{s}exit {d}{s}\n", .{ if (code == 0) ctx.k(ctx_mod.GREEN) else ctx.k(ctx_mod.RED), code, ctx.k(ctx_mod.RESET) });
+    ctx.emit("{s}exit {d}{s}\n", .{ if (code == 0) ctx.k(colors.GREEN) else ctx.k(colors.RED), code, ctx.k(colors.RESET) });
 }
 
 pub fn cmdExplain(ctx: *Ctx, input: []const u8) !void {
@@ -264,9 +260,9 @@ pub fn cmdExplain(ctx: *Ctx, input: []const u8) !void {
         return;
     };
     if (!std.mem.eql(u8, schedule, input))
-        ctx.emit("{s}\"{s}\"{s} \xe2\x86\x92 {s}{s}{s}\n", .{ ctx.k(ctx_mod.DIM), input, ctx.k(ctx_mod.RESET), ctx.k(ctx_mod.BOLD), schedule, ctx.k(ctx_mod.RESET) })
+        ctx.emit("{s}\"{s}\"{s} \xe2\x86\x92 {s}{s}{s}\n", .{ ctx.k(colors.DIM), input, ctx.k(colors.RESET), ctx.k(colors.BOLD), schedule, ctx.k(colors.RESET) })
     else
-        ctx.emit("{s}{s}{s}\n", .{ ctx.k(ctx_mod.BOLD), schedule, ctx.k(ctx_mod.RESET) });
+        ctx.emit("{s}{s}{s}\n", .{ ctx.k(colors.BOLD), schedule, ctx.k(colors.RESET) });
     ctx.emit("  {s}\n", .{humanize.humanize(ctx.a, schedule)});
     if (sched.reboot) {
         ctx.emit("  runs once at boot\n", .{});
@@ -288,7 +284,7 @@ pub fn cmdBackup(ctx: *Ctx, t: Target, content: []const u8) !void {
         ctx.fail(1);
         return;
     };
-    ctx.emit("{s}\xe2\x9c\x93{s} backed up {s} to {s}\n", .{ ctx.k(ctx_mod.GREEN), ctx.k(ctx_mod.RESET), t.label(ctx.a), p });
+    ctx.emit("{s}\xe2\x9c\x93{s} backed up {s} to {s}\n", .{ ctx.k(colors.GREEN), ctx.k(colors.RESET), t.label(ctx.a), p });
 }
 
 pub fn cmdRestore(ctx: *Ctx, t: Target, current: []const u8, given: ?[]const u8) !void {
@@ -302,7 +298,7 @@ pub fn cmdRestore(ctx: *Ctx, t: Target, current: []const u8, given: ?[]const u8)
         ctx.fail(1);
         return;
     };
-    ctx.emit("{s}restoring {s} from {s}{s}\n", .{ ctx.k(ctx_mod.DIM), t.label(ctx.a), path, ctx.k(ctx_mod.RESET) });
+    ctx.emit("{s}restoring {s} from {s}{s}\n", .{ ctx.k(colors.DIM), t.label(ctx.a), path, ctx.k(colors.RESET) });
     try applyMutation(ctx, t, current, data, "restored snapshot");
 }
 
@@ -327,9 +323,9 @@ pub fn cmdImport(ctx: *Ctx, t: Target, content: []const u8) !void {
         },
         else => {},
     };
-    if (skipped > 0) ctx.emit("{s}skipped {d} unmanaged line(s) that don't parse as cron{s}\n", .{ ctx.k(ctx_mod.DIM), skipped, ctx.k(ctx_mod.RESET) });
+    if (skipped > 0) ctx.emit("{s}skipped {d} unmanaged line(s) that don't parse as cron{s}\n", .{ ctx.k(colors.DIM), skipped, ctx.k(colors.RESET) });
     if (n == 0) {
-        ctx.emit("{s}no unmanaged jobs to import on {s}{s}\n", .{ ctx.k(ctx_mod.DIM), t.label(ctx.a), ctx.k(ctx_mod.RESET) });
+        ctx.emit("{s}no unmanaged jobs to import on {s}{s}\n", .{ ctx.k(colors.DIM), t.label(ctx.a), ctx.k(colors.RESET) });
         return;
     }
     const new_content = try model.serialize(ctx.a, &ct);

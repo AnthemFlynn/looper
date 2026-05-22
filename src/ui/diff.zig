@@ -2,6 +2,7 @@
 //! files but a crontab maxes out at hundreds of lines.
 const std = @import("std");
 const ctx_mod = @import("../ctx.zig");
+const colors = @import("colors.zig");
 
 pub fn printDiff(ctx: *ctx_mod.Ctx, old: []const u8, new: []const u8) void {
     const a = ctx.a;
@@ -31,15 +32,15 @@ pub fn printDiff(ctx: *ctx_mod.Ctx, old: []const u8, new: []const u8) void {
             x += 1;
             y += 1;
         } else if (dp[(x + 1) * (n + 1) + y] >= dp[x * (n + 1) + (y + 1)]) {
-            ctx.emit("{s}- {s}{s}\n", .{ ctx.k(ctx_mod.RED), ol.items[x], ctx.k(ctx_mod.RESET) });
+            ctx.emit("{s}- {s}{s}\n", .{ ctx.k(colors.RED), ol.items[x], ctx.k(colors.RESET) });
             x += 1;
         } else {
-            ctx.emit("{s}+ {s}{s}\n", .{ ctx.k(ctx_mod.GREEN), nl.items[y], ctx.k(ctx_mod.RESET) });
+            ctx.emit("{s}+ {s}{s}\n", .{ ctx.k(colors.GREEN), nl.items[y], ctx.k(colors.RESET) });
             y += 1;
         }
     }
-    while (x < m) : (x += 1) ctx.emit("{s}- {s}{s}\n", .{ ctx.k(ctx_mod.RED), ol.items[x], ctx.k(ctx_mod.RESET) });
-    while (y < n) : (y += 1) ctx.emit("{s}+ {s}{s}\n", .{ ctx.k(ctx_mod.GREEN), nl.items[y], ctx.k(ctx_mod.RESET) });
+    while (x < m) : (x += 1) ctx.emit("{s}- {s}{s}\n", .{ ctx.k(colors.RED), ol.items[x], ctx.k(colors.RESET) });
+    while (y < n) : (y += 1) ctx.emit("{s}+ {s}{s}\n", .{ ctx.k(colors.GREEN), nl.items[y], ctx.k(colors.RESET) });
 }
 
 const testing = std.testing;
