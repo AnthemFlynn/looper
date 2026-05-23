@@ -4,6 +4,7 @@
 //! verbatim.
 const std = @import("std");
 const ctx_mod = @import("../ctx.zig");
+const posix = @import("../posix.zig");
 
 pub const MARKER = "#looper#";
 
@@ -11,21 +12,33 @@ pub const Job = struct {
     id: []const u8,
     enabled: bool,
     schedule: []const u8,
+    /// The USER'S command — the inner command the wrapper invokes.
+    /// For non-wrapped jobs this is just the cron payload verbatim;
+    /// for wrapped jobs (`once=1` or `capture=1`) the wrapper is
+    /// reconstructed at serialize time from `wrapper_bin` + marker
+    /// flags, and stripped back to this inner form at parse time.
+    /// `looper ls` and friends always see the user's intent.
     command: []const u8,
     foreign: bool = false,
     /// One-shot: fires once at the scheduled time, then `_exec` removes
     /// the job from the crontab. The cron schedule (M H D Mo *) still
     /// repeats annually, so self-removal is what makes it "once".
     once: bool = false,
-    /// When set, the cron payload is a `looper _exec --run-id=X --` wrapper
-    /// that captures stdout/stderr to `state_dir/runs/<run_id>/`. For
-    /// recurring jobs with capture, `_exec` generates a fresh run_id per
-    /// invocation; the marker's run_id is just the "series" anchor.
+    /// When set, the cron payload is a `looper _exec ...` wrapper that
+    /// captures stdout/stderr to `state_dir/runs/<run_id>/`. For recurring
+    /// jobs with capture, `_exec` generates a fresh run_id per invocation;
+    /// the marker's run_id is just the "series" anchor.
     capture: bool = false,
     /// Series anchor for one-shots; null for plain recurring jobs.
     run_id: ?[]const u8 = null,
     /// Max wall-clock seconds before `_exec` kills the child. Null = no limit.
     timeout_secs: ?u32 = null,
+    /// Absolute path to the looper binary that was current when this
+    /// wrapped job was written. Embedded in the cron payload so the job
+    /// keeps firing the right binary even if looper later moves or a
+    /// shell PATH change would have broken bare-name lookup. Null for
+    /// non-wrapped jobs.
+    wrapper_bin: ?[]const u8 = null,
 };
 
 pub const Item = union(enum) {
@@ -111,6 +124,9 @@ pub const Marker = struct {
     capture: bool = false,
     run_id: ?[]const u8 = null,
     timeout_secs: ?u32 = null,
+    /// Looper-binary path embedded at write time. The cron payload is
+    /// synthesized from this + marker flags at serialize time.
+    wrapper_bin: ?[]const u8 = null,
 };
 
 pub fn parseMarker(a: std.mem.Allocator, line: []const u8) ?Marker {
@@ -121,6 +137,7 @@ pub fn parseMarker(a: std.mem.Allocator, line: []const u8) ?Marker {
     var capture = false;
     var run_id: ?[]const u8 = null;
     var timeout_secs: ?u32 = null;
+    var wrapper_bin: ?[]const u8 = null;
     var it = std.mem.tokenizeAny(u8, line[MARKER.len..], " \t");
     while (it.next()) |tok| {
         if (std.mem.startsWith(u8, tok, "id=")) id = a.dupe(u8, tok[3..]) catch tok[3..];
@@ -129,9 +146,68 @@ pub fn parseMarker(a: std.mem.Allocator, line: []const u8) ?Marker {
         if (std.mem.startsWith(u8, tok, "capture=")) capture = std.mem.eql(u8, tok[8..], "1");
         if (std.mem.startsWith(u8, tok, "run_id=")) run_id = a.dupe(u8, tok[7..]) catch tok[7..];
         if (std.mem.startsWith(u8, tok, "timeout_secs=")) timeout_secs = std.fmt.parseInt(u32, tok[13..], 10) catch null;
+        if (std.mem.startsWith(u8, tok, "wrapper_bin=")) wrapper_bin = a.dupe(u8, tok[12..]) catch tok[12..];
     }
     if (id.len == 0) return null;
-    return .{ .id = id, .enabled = enabled, .once = once, .capture = capture, .run_id = run_id, .timeout_secs = timeout_secs };
+    return .{
+        .id = id,
+        .enabled = enabled,
+        .once = once,
+        .capture = capture,
+        .run_id = run_id,
+        .timeout_secs = timeout_secs,
+        .wrapper_bin = wrapper_bin,
+    };
+}
+
+/// Sentinel inside a wrapped cron payload that separates the wrapper
+/// flags from the inner shell command. Anything matching " -- /bin/sh -c "
+/// is the user's command, single-quoted for shell-safety.
+const WRAPPER_INNER_SENTINEL = " -- /bin/sh -c ";
+
+/// Synthesize a wrapped cron payload from a Job's marker attributes.
+/// Returns `error.NoWrapperBin` if the job is marked wrapped but its
+/// wrapper_bin is null — should never happen for jobs written by looper,
+/// but guards a malformed hand-edit.
+///
+/// Shape:
+///   <wrapper_bin> _exec --source-id=<id> [--once] [--run-id=<r>]
+///                       [--timeout-secs=<n>] -- /bin/sh -c '<inner>'
+///
+/// where `<inner>` is the shell-quoted form of `j.command`. cron will
+/// pass the whole line to /bin/sh, which exec's looper, which then
+/// `/bin/sh -c`'s the user's command — preserving cron-equivalent
+/// shell semantics (pipes, redirects, env-var expansion).
+pub fn wrapCommand(a: std.mem.Allocator, j: Job) ![]u8 {
+    const wb = j.wrapper_bin orelse return error.NoWrapperBin;
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(a, wb);
+    try out.appendSlice(a, " _exec --source-id=");
+    try out.appendSlice(a, j.id);
+    if (j.once) try out.appendSlice(a, " --once");
+    if (j.run_id) |rid| {
+        try out.appendSlice(a, " --run-id=");
+        try out.appendSlice(a, rid);
+    }
+    if (j.timeout_secs) |t| {
+        const s = try std.fmt.allocPrint(a, " --timeout-secs={d}", .{t});
+        try out.appendSlice(a, s);
+    }
+    try out.appendSlice(a, WRAPPER_INNER_SENTINEL);
+    const quoted = posix.shellQuote(a, j.command);
+    try out.appendSlice(a, quoted);
+    return out.toOwnedSlice(a);
+}
+
+/// Inverse of `wrapCommand`: extract the inner command from a wrapped
+/// cron payload. Returns null on malformed input — caller falls back to
+/// displaying the raw payload, which is at least informative even if
+/// ugly. The sentinel-based split tolerates flag variation; only the
+/// final " -- /bin/sh -c '...'" tail has to match.
+pub fn tryUnwrapInner(a: std.mem.Allocator, payload: []const u8) ?[]const u8 {
+    const start = std.mem.indexOf(u8, payload, WRAPPER_INNER_SENTINEL) orelse return null;
+    const after = payload[start + WRAPPER_INNER_SENTINEL.len ..];
+    return posix.shellUnquote(a, after);
 }
 
 /// Reconstructs a marker line from its struct form. Used by both the
@@ -145,6 +221,7 @@ pub fn serializeMarker(a: std.mem.Allocator, m: Marker) ![]u8 {
     if (m.capture) ctx_mod.aw(a, &out, " capture=1", .{});
     if (m.run_id) |rid| ctx_mod.aw(a, &out, " run_id={s}", .{rid});
     if (m.timeout_secs) |t| ctx_mod.aw(a, &out, " timeout_secs={d}", .{t});
+    if (m.wrapper_bin) |wb| ctx_mod.aw(a, &out, " wrapper_bin={s}", .{wb});
     return out.toOwnedSlice(a);
 }
 
@@ -162,15 +239,27 @@ pub fn parseCrontab(a: std.mem.Allocator, text: []const u8) !Crontab {
                 if (std.mem.startsWith(u8, t, "#")) payload = std.mem.trimStart(u8, t[1..], " \t");
             }
             if (splitScheduleCommand(payload)) |sc| {
+                // For wrapped jobs (capture or once), the cron payload is
+                // the `_exec` invocation; strip the wrapper so Job.command
+                // is what the user typed. If the unwrap fails (malformed
+                // wrapper, hand-edit, format drift), keep the full payload
+                // — degraded display beats silent data loss.
+                const cmd_inner: []const u8 = blk: {
+                    if (pm.capture or pm.once) {
+                        if (tryUnwrapInner(a, sc.cmd)) |inner| break :blk inner;
+                    }
+                    break :blk try a.dupe(u8, sc.cmd);
+                };
                 try ct.items.append(a, .{ .job = .{
                     .id = pm.id,
                     .enabled = pm.enabled,
                     .schedule = try a.dupe(u8, sc.sched),
-                    .command = try a.dupe(u8, sc.cmd),
+                    .command = cmd_inner,
                     .once = pm.once,
                     .capture = pm.capture,
                     .run_id = pm.run_id,
                     .timeout_secs = pm.timeout_secs,
+                    .wrapper_bin = pm.wrapper_bin,
                 } });
             } else {
                 try ct.items.append(a, .{ .raw = try serializeMarker(a, pm) });
@@ -218,10 +307,22 @@ pub fn serialize(a: std.mem.Allocator, ct: *Crontab) ![]u8 {
                     .capture = j.capture,
                     .run_id = j.run_id,
                     .timeout_secs = j.timeout_secs,
+                    .wrapper_bin = j.wrapper_bin,
                 });
                 try out.appendSlice(a, marker_line);
                 try out.append(a, '\n');
-                if (j.enabled) ctx_mod.aw(a, &out, "{s} {s}\n", .{ j.schedule, j.command }) else ctx_mod.aw(a, &out, "# {s} {s}\n", .{ j.schedule, j.command });
+                // Wrapped jobs serialize their cron payload from the
+                // marker attrs; plain jobs emit Job.command verbatim.
+                // Wrapper synthesis failure (no wrapper_bin) falls back
+                // to verbatim emission so a malformed in-memory Job
+                // doesn't lose data on write.
+                const payload: []const u8 = blk: {
+                    if ((j.once or j.capture) and j.wrapper_bin != null) {
+                        break :blk wrapCommand(a, j) catch j.command;
+                    }
+                    break :blk j.command;
+                };
+                if (j.enabled) ctx_mod.aw(a, &out, "{s} {s}\n", .{ j.schedule, payload }) else ctx_mod.aw(a, &out, "# {s} {s}\n", .{ j.schedule, payload });
             }
         },
     };
@@ -516,6 +617,172 @@ test "serialize roundtrip preserves new attributes byte-for-byte" {
     const input =
         \\#looper# id=oneshot enabled=1 once=1 capture=1 run_id=r-42 timeout_secs=120
         \\57 14 23 5 * /usr/local/bin/looper _exec --run-id=r-42 -- /bin/echo hi
+        \\
+    ;
+    var ct = try parseCrontab(a, input);
+    const out = try serialize(a, &ct);
+    try testing.expectEqualStrings(input, out);
+}
+
+test "wrapCommand synthesizes the canonical wrapper invocation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const out = try wrapCommand(a, .{
+        .id = "daily-backup",
+        .enabled = true,
+        .schedule = "0 3 * * *",
+        .command = "/usr/local/bin/backup.sh",
+        .capture = true,
+        .wrapper_bin = "/usr/local/bin/looper",
+    });
+    try testing.expectEqualStrings(
+        "/usr/local/bin/looper _exec --source-id=daily-backup -- /bin/sh -c '/usr/local/bin/backup.sh'",
+        out,
+    );
+}
+
+test "wrapCommand emits --once + --run-id + --timeout-secs when set" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const out = try wrapCommand(a, .{
+        .id = "test-oneshot",
+        .enabled = true,
+        .schedule = "57 14 23 5 *",
+        .command = "echo hi",
+        .once = true,
+        .capture = true,
+        .run_id = "abc123",
+        .timeout_secs = 300,
+        .wrapper_bin = "/usr/local/bin/looper",
+    });
+    try testing.expectEqualStrings(
+        "/usr/local/bin/looper _exec --source-id=test-oneshot --once --run-id=abc123 --timeout-secs=300 -- /bin/sh -c 'echo hi'",
+        out,
+    );
+}
+
+test "wrapCommand shell-quotes commands with embedded single quotes" {
+    // The classic stress test: user's command contains apostrophes.
+    // wrapCommand's job is to make sure those survive the trip through
+    // cron's outer shell.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const out = try wrapCommand(a, .{
+        .id = "msg",
+        .enabled = true,
+        .schedule = "0 9 * * *",
+        .command = "echo it's tuesday",
+        .capture = true,
+        .wrapper_bin = "/usr/local/bin/looper",
+    });
+    try testing.expectEqualStrings(
+        "/usr/local/bin/looper _exec --source-id=msg -- /bin/sh -c 'echo it'\\''s tuesday'",
+        out,
+    );
+}
+
+test "wrapCommand fails when wrapper_bin is null" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const result = wrapCommand(a, .{
+        .id = "x",
+        .enabled = true,
+        .schedule = "0 3 * * *",
+        .command = "/bin/true",
+        .capture = true,
+    });
+    try testing.expectError(error.NoWrapperBin, result);
+}
+
+test "tryUnwrapInner extracts the inner from a wrapped payload" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const payload = "/usr/local/bin/looper _exec --source-id=foo -- /bin/sh -c '/usr/local/bin/backup.sh'";
+    const inner = tryUnwrapInner(a, payload).?;
+    try testing.expectEqualStrings("/usr/local/bin/backup.sh", inner);
+}
+
+test "tryUnwrapInner returns null for unwrapped payloads" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqual(@as(?[]const u8, null), tryUnwrapInner(a, "/bin/echo hi"));
+    try testing.expectEqual(@as(?[]const u8, null), tryUnwrapInner(a, "looper _exec --source-id=x /bin/echo hi"));
+}
+
+test "wrapCommand + tryUnwrapInner are inverses across awkward inputs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const inputs = [_][]const u8{
+        "/bin/true",
+        "echo hi",
+        "it's me",
+        "echo $HOME",
+        "a 'quoted' b",
+        "rsync -av /src/ user@host:/dst/",
+    };
+    for (inputs) |inner| {
+        const wrapped = try wrapCommand(a, .{
+            .id = "rt",
+            .enabled = true,
+            .schedule = "@daily",
+            .command = inner,
+            .capture = true,
+            .wrapper_bin = "/usr/local/bin/looper",
+        });
+        const back = tryUnwrapInner(a, wrapped).?;
+        try testing.expectEqualStrings(inner, back);
+    }
+}
+
+test "parseCrontab unwraps Job.command for wrapped marker" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const input =
+        \\#looper# id=daily-backup enabled=1 capture=1 wrapper_bin=/usr/local/bin/looper
+        \\0 3 * * * /usr/local/bin/looper _exec --source-id=daily-backup -- /bin/sh -c '/usr/local/bin/backup.sh'
+        \\
+    ;
+    const ct = try parseCrontab(a, input);
+    switch (ct.items.items[0]) {
+        .job => |j| {
+            // User-visible Job.command is the inner, not the wrapper.
+            try testing.expectEqualStrings("/usr/local/bin/backup.sh", j.command);
+            try testing.expect(j.capture);
+            try testing.expectEqualStrings("/usr/local/bin/looper", j.wrapper_bin.?);
+        },
+        else => return error.UnexpectedItem,
+    }
+}
+
+test "serialize roundtrip wrapped job preserves bytes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const input =
+        \\#looper# id=daily-backup enabled=1 capture=1 wrapper_bin=/usr/local/bin/looper
+        \\0 3 * * * /usr/local/bin/looper _exec --source-id=daily-backup -- /bin/sh -c '/usr/local/bin/backup.sh'
+        \\
+    ;
+    var ct = try parseCrontab(a, input);
+    const out = try serialize(a, &ct);
+    try testing.expectEqualStrings(input, out);
+}
+
+test "serialize roundtrip wrapped one-shot with all attrs preserves bytes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const input =
+        \\#looper# id=test-fire enabled=1 once=1 capture=1 run_id=rid-7 timeout_secs=300 wrapper_bin=/usr/local/bin/looper
+        \\57 14 23 5 * /usr/local/bin/looper _exec --source-id=test-fire --once --run-id=rid-7 --timeout-secs=300 -- /bin/sh -c 'echo hi'
         \\
     ;
     var ct = try parseCrontab(a, input);
