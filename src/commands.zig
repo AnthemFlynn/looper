@@ -21,6 +21,7 @@ const view = @import("commands/view.zig");
 const backup_cmd = @import("commands/backup.zig");
 const doctor = @import("commands/doctor.zig");
 const preflight = @import("commands/preflight.zig");
+const runs = @import("commands/runs.zig");
 
 // core
 pub const applyMutation = core.applyMutation;
@@ -56,6 +57,13 @@ pub const extractBinary = preflight.extractBinary;
 pub const commandReachable = preflight.commandReachable;
 pub const hasInPath = preflight.hasInPath;
 
+// runs
+pub const cmdRunsLs = runs.cmdRunsLs;
+pub const cmdRunsShow = runs.cmdRunsShow;
+pub const cmdRunsPrune = runs.cmdRunsPrune;
+pub const RunsFilter = runs.Filter;
+pub const parseRunsStatusFilter = runs.parseStatusFilter;
+
 // Ensure the test harness compiles every submodule. `main.zig`'s
 // test {} block imports this file, so anything referenced here gets
 // pulled into the test binary.
@@ -66,8 +74,5 @@ test {
     _ = backup_cmd;
     _ = doctor;
     _ = preflight;
-    // crontab/runs.zig isn't yet imported by any command (Task #6's
-    // commands/exec.zig will be its natural consumer). Anchor it here
-    // so its inline tests are discovered. Remove this when exec lands.
-    _ = @import("crontab/runs.zig");
+    _ = runs;
 }
