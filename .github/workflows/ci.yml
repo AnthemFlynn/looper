@@ -8,8 +8,12 @@ on:
 
 jobs:
   test:
-    name: test (native)
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
