@@ -66,4 +66,8 @@ test {
     _ = backup_cmd;
     _ = doctor;
     _ = preflight;
+    // crontab/runs.zig isn't yet imported by any command (Task #6's
+    // commands/exec.zig will be its natural consumer). Anchor it here
+    // so its inline tests are discovered. Remove this when exec lands.
+    _ = @import("crontab/runs.zig");
 }
