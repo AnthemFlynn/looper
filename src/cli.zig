@@ -41,6 +41,10 @@ pub const ParsedArgs = struct {
     /// under cron" heads-up before learning about it from a silent
     /// mail spool tomorrow morning.
     check_command: bool,
+    /// `add --capture`: wrap the cron payload in `looper _exec` so
+    /// each fire captures stdout/stderr + records exit code under
+    /// state_dir/runs/. Marker gains `capture=1` and `wrapper_bin=<path>`.
+    capture: bool,
     /// `_exec --run-id <id>`: identifies the run record this invocation
     /// will write to under state_dir/runs/<run_id>/. Required for _exec.
     run_id: ?[]const u8,
@@ -85,6 +89,7 @@ pub fn parseArgv(a: std.mem.Allocator, argv: []const []const u8, ctx: *ctx_mod.C
         .from_stamp = null,
         .keep = null,
         .check_command = false,
+        .capture = false,
         .run_id = null,
         .source_id = null,
         .timeout_secs = null,
@@ -186,6 +191,10 @@ pub fn parseArgv(a: std.mem.Allocator, argv: []const []const u8, ctx: *ctx_mod.C
         }
         if (std.mem.eql(u8, arg, "--check-command")) {
             p.check_command = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--capture")) {
+            p.capture = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--run-id")) {
@@ -397,6 +406,24 @@ test "parseArgv --check-command sets the flag" {
     try testing.expectEqualStrings("add", p.positionals[0]);
 }
 
+test "parseArgv --capture sets the flag" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = newCtx(arena.allocator());
+    const argv = [_][]const u8{ "looper", "add", "--capture", "@daily", "/usr/local/bin/backup.sh" };
+    const p = try parseArgv(arena.allocator(), &argv, &ctx);
+    try testing.expect(p.capture);
+}
+
+test "parseArgv --capture default is false" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = newCtx(arena.allocator());
+    const argv = [_][]const u8{ "looper", "add", "@daily", "/bin/echo" };
+    const p = try parseArgv(arena.allocator(), &argv, &ctx);
+    try testing.expect(!p.capture);
+}
+
 test "parseArgv --check-command default is false" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -582,6 +609,7 @@ test "buildTargets default = local" {
         .from_stamp = null,
         .keep = null,
         .check_command = false,
+        .capture = false,
         .run_id = null,
         .source_id = null,
         .timeout_secs = null,
@@ -610,6 +638,7 @@ test "buildTargets file path → one file target" {
         .from_stamp = null,
         .keep = null,
         .check_command = false,
+        .capture = false,
         .run_id = null,
         .source_id = null,
         .timeout_secs = null,
@@ -640,6 +669,7 @@ test "buildTargets -H hosts → one remote per host, sharing user" {
         .from_stamp = null,
         .keep = null,
         .check_command = false,
+        .capture = false,
         .run_id = null,
         .source_id = null,
         .timeout_secs = null,
@@ -670,6 +700,7 @@ test "buildTargets --all parses hosts file, ignores blank/comment lines" {
         .from_stamp = null,
         .keep = null,
         .check_command = false,
+        .capture = false,
         .run_id = null,
         .source_id = null,
         .timeout_secs = null,
@@ -708,6 +739,7 @@ test "buildTargets --all empty hosts file → empty list" {
         .from_stamp = null,
         .keep = null,
         .check_command = false,
+        .capture = false,
         .run_id = null,
         .source_id = null,
         .timeout_secs = null,
@@ -735,6 +767,7 @@ test "buildTargets --all + -u applies user to every remote" {
         .from_stamp = null,
         .keep = null,
         .check_command = false,
+        .capture = false,
         .run_id = null,
         .source_id = null,
         .timeout_secs = null,

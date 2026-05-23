@@ -298,7 +298,7 @@ test "cmdLs --json emits next:null and next_human:null for @reboot" {
     ctx.json = true;
     const tgt = try tmpTarget(a);
     defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try mutate.cmdAdd(&ctx, tgt, "", "@reboot", "/opt/start.sh", "boot", false);
+    try mutate.cmdAdd(&ctx, tgt, "", "@reboot", "/opt/start.sh", "boot", .{});
     ctx.buf.clearRetainingCapacity();
     const content = try target_mod.readFileAll(a, tgt.path);
     const tz = tz_mod.controllerTz(a);
@@ -318,7 +318,7 @@ test "cmdLs --json carries target, human_schedule, tz_source" {
     ctx.json = true;
     const tgt = try tmpTarget(a);
     defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try mutate.cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo", false);
+    try mutate.cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo", .{});
     ctx.buf.clearRetainingCapacity();
     const content = try target_mod.readFileAll(a, tgt.path);
     const tz = tz_mod.controllerTz(a);
@@ -337,7 +337,7 @@ test "cmdShow --json single object with next array of {epoch,human}" {
     ctx.json = true;
     const tgt = try tmpTarget(a);
     defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try mutate.cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo", false);
+    try mutate.cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo", .{});
     ctx.buf.clearRetainingCapacity();
     const content = try target_mod.readFileAll(a, tgt.path);
     const tz = tz_mod.controllerTz(a);
@@ -356,7 +356,7 @@ test "cmdShow --json with @reboot emits empty next array" {
     ctx.json = true;
     const tgt = try tmpTarget(a);
     defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try mutate.cmdAdd(&ctx, tgt, "", "@reboot", "/opt/start.sh", "boot", false);
+    try mutate.cmdAdd(&ctx, tgt, "", "@reboot", "/opt/start.sh", "boot", .{});
     ctx.buf.clearRetainingCapacity();
     const content = try target_mod.readFileAll(a, tgt.path);
     const tz = tz_mod.controllerTz(a);

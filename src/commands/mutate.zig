@@ -18,7 +18,25 @@ const preflight = @import("preflight.zig");
 const Ctx = ctx_mod.Ctx;
 const Target = target_mod.Target;
 
-pub fn cmdAdd(ctx: *Ctx, t: Target, content: []const u8, schedule: []const u8, command: []const u8, want_id: ?[]const u8, check_command: bool) !void {
+/// Optional flags for `cmdAdd`. Bundled into a struct so adding a new
+/// flag (--capture, future --once-by-default, etc.) doesn't break every
+/// caller's positional argument list.
+pub const AddOpts = struct {
+    /// Run the binary-reachability preflight (warns when the command's
+    /// first executable token isn't on PATH for the target). Non-blocking;
+    /// the add proceeds either way.
+    check_command: bool = false,
+    /// Wrap the cron payload in `looper _exec` so each fire writes a
+    /// run record under state_dir/runs/. The looper binary path is
+    /// resolved at this call (posix.looperPath) and embedded in the
+    /// marker as `wrapper_bin=...` so the job survives binary moves
+    /// only insofar as the captured path stays valid. When updating an
+    /// existing job, --capture only sets capture=true; it does not
+    /// unset capture (use rm + re-add for that).
+    capture: bool = false,
+};
+
+pub fn cmdAdd(ctx: *Ctx, t: Target, content: []const u8, schedule: []const u8, command: []const u8, want_id: ?[]const u8, opts: AddOpts) !void {
     const cron = nlp.toCron(ctx.a, schedule) orelse {
         posix.eprint("looper: couldn't read schedule '{s}'\n", .{schedule});
         posix.eprint("  use cron (\"*/15 9-17 * * 1-5\") or plain English (\"every weekday at 9am\")\n", .{});
@@ -38,7 +56,7 @@ pub fn cmdAdd(ctx: *Ctx, t: Target, content: []const u8, schedule: []const u8, c
     // exactly what we want to head off — surface it now, still add the
     // job. Suppressed under --quiet (diagnostic noise) and --json (would
     // pollute the structured output on stdout).
-    if (check_command and !ctx.quiet and !ctx.json) {
+    if (opts.check_command and !ctx.quiet and !ctx.json) {
         if (preflight.extractBinary(command)) |bin| {
             switch (preflight.commandReachable(ctx.a, t, bin)) {
                 .missing => ctx.emit(
@@ -48,6 +66,19 @@ pub fn cmdAdd(ctx: *Ctx, t: Target, content: []const u8, schedule: []const u8, c
                 .found, .skipped => {},
             }
         }
+    }
+    // Capture mode needs the absolute looper path embedded in the marker
+    // so the cron-side wrapper invocation survives even when looper isn't
+    // on cron's PATH (it usually isn't). Resolution is best-effort; if
+    // the platform can't tell us where we live, the add fails loudly
+    // rather than silently producing an unrunnable cron line.
+    var wrapper_bin: ?[]const u8 = null;
+    if (opts.capture) {
+        wrapper_bin = posix.looperPath(ctx.a) orelse {
+            posix.eprint("looper: --capture needs the looper binary path, but this platform doesn't expose one (Linux + macOS only in v1)\n", .{});
+            ctx.fail(1);
+            return;
+        };
     }
     var ct = try model.parseCrontab(ctx.a, content);
     const id = want_id orelse blk: {
@@ -61,7 +92,21 @@ pub fn cmdAdd(ctx: *Ctx, t: Target, content: []const u8, schedule: []const u8, c
         ct.items.items[i].job.schedule = cron;
         ct.items.items[i].job.command = command;
         ct.items.items[i].job.enabled = true;
-    } else try ct.items.append(ctx.a, .{ .job = .{ .id = id, .enabled = true, .schedule = cron, .command = command } });
+        // --capture sets but doesn't unset: explicit re-add without
+        // --capture leaves an existing wrapped job wrapped. To remove
+        // capture, rm + re-add. Documented in AddOpts.
+        if (opts.capture) {
+            ct.items.items[i].job.capture = true;
+            ct.items.items[i].job.wrapper_bin = wrapper_bin;
+        }
+    } else try ct.items.append(ctx.a, .{ .job = .{
+        .id = id,
+        .enabled = true,
+        .schedule = cron,
+        .command = command,
+        .capture = opts.capture,
+        .wrapper_bin = wrapper_bin,
+    } });
     const new_content = try model.serialize(ctx.a, &ct);
     const verb = try std.fmt.allocPrint(ctx.a, "set job '{s}'", .{id});
     try core.applyMutation(ctx, t, content, new_content, verb);
@@ -171,7 +216,7 @@ test "cmdAdd then serialize contains a managed job" {
     var ctx = newCtx(a);
     const tgt = try tmpTarget(a);
     defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo hi", "demo", false);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo hi", "demo", .{});
     const got = try target_mod.readFileAll(a, tgt.path);
     try testing.expect(std.mem.indexOf(u8, got, "#looper# id=demo enabled=1") != null);
     try testing.expect(std.mem.indexOf(u8, got, "0 3 * * * /bin/echo hi") != null);
@@ -184,7 +229,7 @@ test "cmdToggle disables a job by commenting payload" {
     var ctx = newCtx(a);
     const tgt = try tmpTarget(a);
     defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo hi", "demo", false);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo hi", "demo", .{});
     const after_add = try target_mod.readFileAll(a, tgt.path);
     var ids = [_][]const u8{"demo"};
     try cmdToggle(&ctx, tgt, after_add, ids[0..], false);
@@ -200,9 +245,9 @@ test "cmdAdd is idempotent by id" {
     var ctx = newCtx(a);
     const tgt = try tmpTarget(a);
     defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo first", "demo", false);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo first", "demo", .{});
     const c1 = try target_mod.readFileAll(a, tgt.path);
-    try cmdAdd(&ctx, tgt, c1, "0 4 * * *", "/bin/echo second", "demo", false);
+    try cmdAdd(&ctx, tgt, c1, "0 4 * * *", "/bin/echo second", "demo", .{});
     const c2 = try target_mod.readFileAll(a, tgt.path);
     // exactly one marker line — second add updated in place
     var marker_count: usize = 0;
@@ -222,7 +267,7 @@ test "cmdEdit --schedule preserves command" {
     var ctx = newCtx(a);
     const tgt = try tmpTarget(a);
     defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo original", "demo", false);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo original", "demo", .{});
     const after_add = try target_mod.readFileAll(a, tgt.path);
     try cmdEdit(&ctx, tgt, after_add, "demo", "0 4 * * *", null);
     const got = try target_mod.readFileAll(a, tgt.path);
@@ -237,7 +282,7 @@ test "cmdEdit --command preserves schedule" {
     var ctx = newCtx(a);
     const tgt = try tmpTarget(a);
     defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo original", "demo", false);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo original", "demo", .{});
     const after_add = try target_mod.readFileAll(a, tgt.path);
     try cmdEdit(&ctx, tgt, after_add, "demo", null, "/bin/echo updated");
     const got = try target_mod.readFileAll(a, tgt.path);
@@ -252,7 +297,7 @@ test "cmdEdit both flags update both fields" {
     var ctx = newCtx(a);
     const tgt = try tmpTarget(a);
     defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo", false);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo", .{});
     const after_add = try target_mod.readFileAll(a, tgt.path);
     try cmdEdit(&ctx, tgt, after_add, "demo", "@hourly", "/bin/echo b");
     const got = try target_mod.readFileAll(a, tgt.path);
@@ -289,7 +334,7 @@ test "cmdEdit rejects invalid schedule" {
     var ctx = newCtx(a);
     const tgt = try tmpTarget(a);
     defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo", false);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo", .{});
     const after_add = try target_mod.readFileAll(a, tgt.path);
     try cmdEdit(&ctx, tgt, after_add, "demo", "not a real schedule and not English either", null);
     try testing.expectEqual(@as(u8, 1), ctx.exit_code);
@@ -305,7 +350,7 @@ test "cmdEdit accepts an @macro schedule" {
     var ctx = newCtx(a);
     const tgt = try tmpTarget(a);
     defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
-    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo", false);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo", .{});
     const after_add = try target_mod.readFileAll(a, tgt.path);
     try cmdEdit(&ctx, tgt, after_add, "demo", "@daily", null);
     const got = try target_mod.readFileAll(a, tgt.path);
@@ -324,7 +369,7 @@ test "cmdAdd local+missing+check_command emits the yellow ! warning" {
     ctx.color = false;
     ctx.dry_run = true;
     const tgt: Target = .{ .kind = .local };
-    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/zzz/almost/certainly/not/here", "demo", true);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/zzz/almost/certainly/not/here", "demo", .{ .check_command = true });
     try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "not found on local") != null);
     try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "/zzz/almost/certainly/not/here") != null);
 }
@@ -339,7 +384,7 @@ test "cmdAdd local+found+check_command emits NO warning (binary exists)" {
     ctx.color = false;
     ctx.dry_run = true;
     const tgt: Target = .{ .kind = .local };
-    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/sh -c 'echo hi'", "demo", true);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/sh -c 'echo hi'", "demo", .{ .check_command = true });
     try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "not found") == null);
 }
 
@@ -355,7 +400,7 @@ test "cmdAdd local+missing+check_command under --json suppresses the warning" {
     ctx.json = true;
     ctx.dry_run = true;
     const tgt: Target = .{ .kind = .local };
-    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/zzz/almost/certainly/not/here", "demo", true);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/zzz/almost/certainly/not/here", "demo", .{ .check_command = true });
     try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "not found") == null);
 }
 
@@ -370,8 +415,88 @@ test "cmdAdd local+missing+check_command under --quiet suppresses the warning" {
     ctx.quiet = true;
     ctx.dry_run = true;
     const tgt: Target = .{ .kind = .local };
-    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/zzz/almost/certainly/not/here", "demo", true);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/zzz/almost/certainly/not/here", "demo", .{ .check_command = true });
     try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "not found") == null);
+}
+
+test "cmdAdd --capture marks the job and embeds wrapper_bin" {
+    // End-to-end check: --capture goes in, the resulting crontab has
+    // a marker with capture=1 + wrapper_bin pointing at the live looper
+    // binary, and the cron payload is the synthesized wrapper line.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/usr/local/bin/backup.sh", "demo", .{ .capture = true });
+    const got = try target_mod.readFileAll(a, tgt.path);
+    try testing.expect(std.mem.indexOf(u8, got, "capture=1") != null);
+    try testing.expect(std.mem.indexOf(u8, got, "wrapper_bin=") != null);
+    // Cron payload must contain the _exec sentinel + shell-quoted inner.
+    try testing.expect(std.mem.indexOf(u8, got, "_exec --source-id=demo") != null);
+    try testing.expect(std.mem.indexOf(u8, got, " -- /bin/sh -c '/usr/local/bin/backup.sh'") != null);
+}
+
+test "cmdAdd --capture round-trips through parseCrontab unchanged" {
+    // After cmdAdd writes a wrapped job, re-reading the file must
+    // surface the user's INNER command on Job.command (not the wrapper).
+    // This is the DX promise: looper ls shows what you typed.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/usr/local/bin/backup.sh --verbose", "demo", .{ .capture = true });
+    const got = try target_mod.readFileAll(a, tgt.path);
+    const ct = try model.parseCrontab(a, got);
+    var found = false;
+    for (ct.items.items) |it| switch (it) {
+        .job => |j| if (std.mem.eql(u8, j.id, "demo")) {
+            try testing.expectEqualStrings("/usr/local/bin/backup.sh --verbose", j.command);
+            try testing.expect(j.capture);
+            try testing.expect(j.wrapper_bin != null);
+            found = true;
+        },
+        else => {},
+    };
+    try testing.expect(found);
+}
+
+test "cmdAdd without --capture leaves capture=0" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo", "demo", .{});
+    const got = try target_mod.readFileAll(a, tgt.path);
+    try testing.expect(std.mem.indexOf(u8, got, "capture=1") == null);
+    try testing.expect(std.mem.indexOf(u8, got, "wrapper_bin=") == null);
+    try testing.expect(std.mem.indexOf(u8, got, "_exec") == null);
+}
+
+test "cmdAdd --capture preserves capture when re-adding without --capture" {
+    // Sticky behavior: once a job is capture-enabled, plain `looper add`
+    // doesn't silently strip capture. To remove, rm + re-add (documented
+    // contract on AddOpts.capture).
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo", .{ .capture = true });
+    const c1 = try target_mod.readFileAll(a, tgt.path);
+    try cmdAdd(&ctx, tgt, c1, "0 4 * * *", "/bin/echo b", "demo", .{});
+    const c2 = try target_mod.readFileAll(a, tgt.path);
+    // Schedule updated (4 instead of 3), command updated, but capture
+    // still set. wrapper_bin also preserved.
+    try testing.expect(std.mem.indexOf(u8, c2, "capture=1") != null);
+    try testing.expect(std.mem.indexOf(u8, c2, "0 4 * * *") != null);
+    try testing.expect(std.mem.indexOf(u8, c2, "/bin/echo b") != null);
 }
 
 test "cmdAdd check_command=false does not probe at all" {
@@ -385,6 +510,6 @@ test "cmdAdd check_command=false does not probe at all" {
     ctx.color = false;
     ctx.dry_run = true;
     const tgt: Target = .{ .kind = .local };
-    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/zzz/missing", "demo", false);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/zzz/missing", "demo", .{});
     try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "not found") == null);
 }
