@@ -14,6 +14,7 @@ pub const c = @cImport({
     @cInclude("fcntl.h");
     @cInclude("dirent.h");
     @cInclude("time.h");
+    @cInclude("signal.h"); // kill(2), SIGTERM/SIGKILL — needed by _exec timeout
 });
 
 pub fn getenv(name: [*:0]const u8) ?[]const u8 {

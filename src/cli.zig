@@ -41,6 +41,23 @@ pub const ParsedArgs = struct {
     /// under cron" heads-up before learning about it from a silent
     /// mail spool tomorrow morning.
     check_command: bool,
+    /// `_exec --run-id <id>`: identifies the run record this invocation
+    /// will write to under state_dir/runs/<run_id>/. Required for _exec.
+    run_id: ?[]const u8,
+    /// `_exec --source-id <id>`: looper job id to remove on completion
+    /// when --once is set. Skipped if absent (no self-removal).
+    source_id: ?[]const u8,
+    /// `_exec --timeout-secs N`: kill child after N seconds. Null = wait
+    /// indefinitely. Parsed as u32 so 0 is a valid "kill immediately"
+    /// (mostly only useful for tests).
+    timeout_secs: ?u32,
+    /// `_exec --target-label <L>`: display label recorded on the run
+    /// record. Optional — defaults to "local" when unset.
+    target_label: ?[]const u8,
+    /// `_exec --once`: after the child exits, remove the source job
+    /// from the local crontab. Without this, _exec just records the
+    /// run (used by capture-enabled recurring jobs).
+    once_flag: bool,
     force_help: bool,
     /// Set to the offending arg when an unknown option (e.g. `--frob`)
     /// is encountered. Parsing stops at the first unknown option so
@@ -68,6 +85,11 @@ pub fn parseArgv(a: std.mem.Allocator, argv: []const []const u8, ctx: *ctx_mod.C
         .from_stamp = null,
         .keep = null,
         .check_command = false,
+        .run_id = null,
+        .source_id = null,
+        .timeout_secs = null,
+        .target_label = null,
+        .once_flag = false,
         .force_help = false,
         .bad_option = null,
     };
@@ -164,6 +186,40 @@ pub fn parseArgv(a: std.mem.Allocator, argv: []const []const u8, ctx: *ctx_mod.C
         }
         if (std.mem.eql(u8, arg, "--check-command")) {
             p.check_command = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--run-id")) {
+            i += 1;
+            if (i < argv.len) p.run_id = argv[i];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--source-id")) {
+            i += 1;
+            if (i < argv.len) p.source_id = argv[i];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--timeout-secs")) {
+            i += 1;
+            if (i < argv.len) {
+                // Same up-front parse-or-fail pattern as --keep so a bogus
+                // value is a hard argv error, not something _exec has to
+                // recover from mid-execution.
+                p.timeout_secs = std.fmt.parseInt(u32, argv[i], 10) catch {
+                    p.bad_option = argv[i];
+                    p.positionals = try positionals.toOwnedSlice(a);
+                    p.hosts = try hosts.toOwnedSlice(a);
+                    return p;
+                };
+            }
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--target-label")) {
+            i += 1;
+            if (i < argv.len) p.target_label = argv[i];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--once")) {
+            p.once_flag = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
@@ -397,6 +453,100 @@ test "parseArgv unknown option sets bad_option and stops parsing" {
     try testing.expect(!ctx.json);
 }
 
+test "parseArgv --run-id captures value" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = newCtx(arena.allocator());
+    const argv = [_][]const u8{ "looper", "_exec", "--run-id", "abc123", "--", "/bin/echo", "hi" };
+    const p = try parseArgv(arena.allocator(), &argv, &ctx);
+    try testing.expectEqualStrings("abc123", p.run_id.?);
+}
+
+test "parseArgv --source-id captures value" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = newCtx(arena.allocator());
+    const argv = [_][]const u8{ "looper", "_exec", "--source-id", "daily-backup" };
+    const p = try parseArgv(arena.allocator(), &argv, &ctx);
+    try testing.expectEqualStrings("daily-backup", p.source_id.?);
+}
+
+test "parseArgv --timeout-secs parses to u32" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = newCtx(arena.allocator());
+    const argv = [_][]const u8{ "looper", "_exec", "--timeout-secs", "300" };
+    const p = try parseArgv(arena.allocator(), &argv, &ctx);
+    try testing.expectEqual(@as(?u32, 300), p.timeout_secs);
+}
+
+test "parseArgv --timeout-secs rejects non-numeric value as bad_option" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = newCtx(arena.allocator());
+    const argv = [_][]const u8{ "looper", "_exec", "--timeout-secs", "nope" };
+    const p = try parseArgv(arena.allocator(), &argv, &ctx);
+    try testing.expect(p.bad_option != null);
+    try testing.expectEqualStrings("nope", p.bad_option.?);
+}
+
+test "parseArgv --once sets the boolean" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = newCtx(arena.allocator());
+    const argv = [_][]const u8{ "looper", "_exec", "--once" };
+    const p = try parseArgv(arena.allocator(), &argv, &ctx);
+    try testing.expect(p.once_flag);
+}
+
+test "parseArgv --once default is false" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = newCtx(arena.allocator());
+    const argv = [_][]const u8{ "looper", "_exec" };
+    const p = try parseArgv(arena.allocator(), &argv, &ctx);
+    try testing.expect(!p.once_flag);
+}
+
+test "parseArgv --target-label captures value" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = newCtx(arena.allocator());
+    const argv = [_][]const u8{ "looper", "_exec", "--target-label", "local" };
+    const p = try parseArgv(arena.allocator(), &argv, &ctx);
+    try testing.expectEqualStrings("local", p.target_label.?);
+}
+
+test "parseArgv full _exec invocation parses cleanly" {
+    // Realistic shape of what cron will pass — every _exec flag plus
+    // the user's command tokens after `--`. Smoke test for the
+    // interaction of these flags with the existing `--` handling.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = newCtx(arena.allocator());
+    const argv = [_][]const u8{
+        "looper",         "_exec",
+        "--run-id",       "r-42",
+        "--source-id",    "oneshot-x",
+        "--timeout-secs", "60",
+        "--target-label", "local",
+        "--once",
+        "--",             "/bin/sh", "-c", "echo hi",
+    };
+    const p = try parseArgv(arena.allocator(), &argv, &ctx);
+    try testing.expectEqualStrings("r-42", p.run_id.?);
+    try testing.expectEqualStrings("oneshot-x", p.source_id.?);
+    try testing.expectEqual(@as(?u32, 60), p.timeout_secs);
+    try testing.expectEqualStrings("local", p.target_label.?);
+    try testing.expect(p.once_flag);
+    // Positionals after --: _exec subcommand + the user's shell-cmd tokens.
+    try testing.expectEqual(@as(usize, 4), p.positionals.len);
+    try testing.expectEqualStrings("_exec", p.positionals[0]);
+    try testing.expectEqualStrings("/bin/sh", p.positionals[1]);
+    try testing.expectEqualStrings("-c", p.positionals[2]);
+    try testing.expectEqualStrings("echo hi", p.positionals[3]);
+}
+
 test "parseArgv --help sets force_help" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -432,6 +582,11 @@ test "buildTargets default = local" {
         .from_stamp = null,
         .keep = null,
         .check_command = false,
+        .run_id = null,
+        .source_id = null,
+        .timeout_secs = null,
+        .target_label = null,
+        .once_flag = false,
         .force_help = false,
         .bad_option = null,
     };
@@ -455,6 +610,11 @@ test "buildTargets file path → one file target" {
         .from_stamp = null,
         .keep = null,
         .check_command = false,
+        .run_id = null,
+        .source_id = null,
+        .timeout_secs = null,
+        .target_label = null,
+        .once_flag = false,
         .force_help = false,
         .bad_option = null,
     };
@@ -480,6 +640,11 @@ test "buildTargets -H hosts → one remote per host, sharing user" {
         .from_stamp = null,
         .keep = null,
         .check_command = false,
+        .run_id = null,
+        .source_id = null,
+        .timeout_secs = null,
+        .target_label = null,
+        .once_flag = false,
         .force_help = false,
         .bad_option = null,
     };
@@ -505,6 +670,11 @@ test "buildTargets --all parses hosts file, ignores blank/comment lines" {
         .from_stamp = null,
         .keep = null,
         .check_command = false,
+        .run_id = null,
+        .source_id = null,
+        .timeout_secs = null,
+        .target_label = null,
+        .once_flag = false,
         .force_help = false,
         .bad_option = null,
     };
@@ -538,6 +708,11 @@ test "buildTargets --all empty hosts file → empty list" {
         .from_stamp = null,
         .keep = null,
         .check_command = false,
+        .run_id = null,
+        .source_id = null,
+        .timeout_secs = null,
+        .target_label = null,
+        .once_flag = false,
         .force_help = false,
         .bad_option = null,
     };
@@ -560,6 +735,11 @@ test "buildTargets --all + -u applies user to every remote" {
         .from_stamp = null,
         .keep = null,
         .check_command = false,
+        .run_id = null,
+        .source_id = null,
+        .timeout_secs = null,
+        .target_label = null,
+        .once_flag = false,
         .force_help = false,
         .bad_option = null,
     };

@@ -22,6 +22,7 @@ const backup_cmd = @import("commands/backup.zig");
 const doctor = @import("commands/doctor.zig");
 const preflight = @import("commands/preflight.zig");
 const runs = @import("commands/runs.zig");
+const exec = @import("commands/exec.zig");
 
 // core
 pub const applyMutation = core.applyMutation;
@@ -64,6 +65,9 @@ pub const cmdRunsPrune = runs.cmdRunsPrune;
 pub const RunsFilter = runs.Filter;
 pub const parseRunsStatusFilter = runs.parseStatusFilter;
 
+// exec
+pub const cmdExec = exec.cmdExec;
+
 // Ensure the test harness compiles every submodule. `main.zig`'s
 // test {} block imports this file, so anything referenced here gets
 // pulled into the test binary.
@@ -75,4 +79,5 @@ test {
     _ = doctor;
     _ = preflight;
     _ = runs;
+    _ = exec;
 }
