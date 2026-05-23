@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`looper` is a Zig 0.16 CLI that manages cron jobs — locally, for another user, on remote hosts over `ssh`, or in a plain crontab file. The source lives under `src/` (~2100 lines across 18 modules), libc-only, no third-party dependencies. Built with `build.zig` (`zig build`); cross-targets are passed via `-Dtarget=...`.
+`looper` is a Zig 0.16 CLI that manages cron jobs — locally, for another user, on remote hosts over `ssh`, or in a plain crontab file. The source lives under `src/`, libc-only, no third-party dependencies. Built with `build.zig` (`zig build`); cross-targets are passed via `-Dtarget=...`.
 
 ## Build & run
 
@@ -29,7 +29,14 @@ src/
   posix.zig               Single @cImport for libc; runCapture / runInherit / writeAll / getenv / nowEpoch
   tz.zig                  Pure TzInfo {offset_secs, abbrev, source}; controllerTz, parseDateProbe
   tz_probe.zig            Remote-side ssh TZ probe + per-run Cache; pairs with tz.zig
-  commands.zig            applyMutation + cmdLs/Add/Edit/Rm/Toggle/Show/Run/Explain/Backup/Restore/Import/Doctor
+  commands.zig            Thin re-export façade over commands/* (preserves the import path main.zig uses)
+  commands/
+    core.zig              applyMutation funnel + nextFor (TZ-aware next-run dispatch)
+    mutate.zig            cmdAdd / cmdEdit / cmdRm / cmdToggle (enable / disable)
+    view.zig              cmdLs / cmdShow / cmdRun / cmdExplain
+    backup.zig            cmdBackup / cmdBackups / cmdBackupsPrune / cmdRestore / cmdImport
+    doctor.zig            cmdDoctor + dirWritable / fileReadable / sshReachable
+    preflight.zig         --check-command surface: extractBinary + commandReachable + hasInPath
   cron/
     schedule.zig          Schedule bitset + parseSchedule + fieldBounds + parseField + nameToNum
     next_run.zig          nextRun (controller-zone, DST-correct) + nextRunInTz (fixed-offset target zone)
@@ -55,7 +62,7 @@ Inline `test "..." { ... }` blocks colocated at the bottom of each module. `zig 
 ## Architectural rules to preserve
 
 - **Never emit non-standard cron.** `parseSchedule` validates before any write. If `nlpToCron` returns null for an English phrase, surface the failure — do not invent syntax.
-- **Every mutation is preceded by a backup.** `applyMutation` in `commands.zig` is the single funnel; new commands that change the crontab must route through it.
+- **Every mutation is preceded by a backup.** `applyMutation` in `commands/core.zig` is the single funnel; new commands that change the crontab must route through it.
 - **Managed jobs are identified solely by the `#looper#` marker line.** Lines without that marker are "foreign" and must be preserved untouched on serialize. `import` is the only path that adopts them.
 - **Idempotency by `id`.** `add` with an existing id updates in place (full re-statement of schedule + command); never appends a duplicate. For changing only one field — schedule OR command — use `edit <id> --schedule X` / `--command Y` so the unchanged field can't drift.
 - **`set` aliases `edit`, not `add`.** Historical: `set` was an undocumented alias for `add`. Reassigned because the natural reading of "set the schedule of X" is the partial-update semantics, which is also less error-prone (no re-statement of the other field).
@@ -67,7 +74,7 @@ Inline `test "..." { ... }` blocks colocated at the bottom of each module. `zig 
 - **Output goes through `ctx.emit` + `ctx.flush`,** not direct stdio. Errors go through `posix.eprint`. `Ctx.exit_code` + `ctx.fail(code)` accumulate non-fatal failures (first-failure-wins) so a multi-target run still surfaces a non-zero exit.
 - **`doctor` owns its own target loop.** It branches before the standard per-target read loop in `main.zig` because the read failures the loop treats as fatal-per-target are exactly what doctor is reporting on. New "diagnostic" commands should follow the same pattern.
 - **Timezones flow as values through `cron/`.** The `cron/` subdir stays I/O-free; any function that needs the target's zone takes a `TzInfo` (or just `offset_secs`) parameter. `nextRunInTz` and `fmtWhenIn` are the canonical "operate in a supplied zone" functions. The I/O — the ssh-side `date +%z` probe — lives in `tz_probe.zig` (standalone) and `crontab/target.zig` (piggybacked on `crontab -l` via sentinel split). Never call probing code from `cron/`.
-- **`add --check-command` is opt-in, non-blocking, and never writes.** The reachability probe (`extractBinary` + `commandReachable` in `commands.zig`) runs after schedule validation, before `applyMutation`. A `missing` result yields one yellow `!` line; `found` and `skipped` (file targets, unparseable commands, broken probe) stay silent. The warning is suppressed under `--quiet` and under `--json` (it would corrupt structured stdout). The add proceeds regardless — cron failures are diagnosed, not blocked, so `--check-command` never gets in the user's way. Remote probes use `ssh ... sh -c "command -v -- 'BIN' >/dev/null 2>&1"`; `commandReachable` refuses to probe binary names containing characters outside `[A-Za-z0-9_.+/-]` so a malformed extraction never reaches the shell.
+- **`add --check-command` is opt-in, non-blocking, and never writes.** The reachability probe (`extractBinary` + `commandReachable` in `commands/preflight.zig`) runs after schedule validation, before `applyMutation`. A `missing` result yields one yellow `!` line; `found` and `skipped` (file targets, unparseable commands, broken probe) stay silent. The warning is suppressed under `--quiet` and under `--json` (it would corrupt structured stdout). The add proceeds regardless — cron failures are diagnosed, not blocked, so `--check-command` never gets in the user's way. Remote probes use `ssh ... sh -c "command -v -- 'BIN' >/dev/null 2>&1"`; `commandReachable` refuses to probe binary names containing characters outside `[A-Za-z0-9_.+/-]` so a malformed extraction never reaches the shell.
 
 ## SOLID lines
 

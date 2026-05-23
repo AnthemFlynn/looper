@@ -1,0 +1,390 @@
+//! Crontab mutators: add, edit, rm, enable/disable. Every one routes
+//! its write through `core.applyMutation`; nothing here calls
+//! `writeCrontab` directly.
+
+const std = @import("std");
+const posix = @import("../posix.zig");
+const ctx_mod = @import("../ctx.zig");
+const target_mod = @import("../crontab/target.zig");
+const model = @import("../crontab/model.zig");
+const sched_mod = @import("../cron/schedule.zig");
+const humanize = @import("../cron/humanize.zig");
+const nlp = @import("../cron/nlp.zig");
+const display = @import("../ui/display.zig");
+const colors = @import("../ui/colors.zig");
+const core = @import("core.zig");
+const preflight = @import("preflight.zig");
+
+const Ctx = ctx_mod.Ctx;
+const Target = target_mod.Target;
+
+pub fn cmdAdd(ctx: *Ctx, t: Target, content: []const u8, schedule: []const u8, command: []const u8, want_id: ?[]const u8, check_command: bool) !void {
+    const cron = nlp.toCron(ctx.a, schedule) orelse {
+        posix.eprint("looper: couldn't read schedule '{s}'\n", .{schedule});
+        posix.eprint("  use cron (\"*/15 9-17 * * 1-5\") or plain English (\"every weekday at 9am\")\n", .{});
+        posix.eprint("  preview with: looper explain '{s}'\n", .{schedule});
+        ctx.fail(1);
+        return;
+    };
+    _ = sched_mod.parseSchedule(cron) catch |e| {
+        posix.eprint("looper: invalid schedule '{s}': {s}\n", .{ cron, @errorName(e) });
+        ctx.fail(1);
+        return;
+    };
+    if (!std.mem.eql(u8, cron, schedule))
+        ctx.emit("{s}interpreted{s} \"{s}\" as {s}{s}{s}  ({s})\n", .{ ctx.k(colors.DIM), ctx.k(colors.RESET), schedule, ctx.k(colors.BOLD), cron, ctx.k(colors.RESET), humanize.humanize(ctx.a, cron) });
+    // Opt-in preflight. Not blocking: cron failures usually surface as
+    // silent "no such file or directory" in the mail spool, which is
+    // exactly what we want to head off — surface it now, still add the
+    // job. Suppressed under --quiet (diagnostic noise) and --json (would
+    // pollute the structured output on stdout).
+    if (check_command and !ctx.quiet and !ctx.json) {
+        if (preflight.extractBinary(command)) |bin| {
+            switch (preflight.commandReachable(ctx.a, t, bin)) {
+                .missing => ctx.emit(
+                    "{s}!{s} command {s}'{s}'{s} not found on {s} — cron may fail to run (PATH under cron is minimal; consider an absolute path)\n",
+                    .{ ctx.k(colors.YELLOW), ctx.k(colors.RESET), ctx.k(colors.BOLD), bin, ctx.k(colors.RESET), t.label(ctx.a) },
+                ),
+                .found, .skipped => {},
+            }
+        }
+    }
+    var ct = try model.parseCrontab(ctx.a, content);
+    const id = want_id orelse blk: {
+        for (ct.items.items) |it| switch (it) {
+            .job => |j| if (!j.foreign and std.mem.eql(u8, j.schedule, cron) and std.mem.eql(u8, j.command, command)) break :blk j.id,
+            else => {},
+        };
+        break :blk display.slugUnique(ctx.a, &ct, command);
+    };
+    if (ct.findIndex(id)) |i| {
+        ct.items.items[i].job.schedule = cron;
+        ct.items.items[i].job.command = command;
+        ct.items.items[i].job.enabled = true;
+    } else try ct.items.append(ctx.a, .{ .job = .{ .id = id, .enabled = true, .schedule = cron, .command = command } });
+    const new_content = try model.serialize(ctx.a, &ct);
+    const verb = try std.fmt.allocPrint(ctx.a, "set job '{s}'", .{id});
+    try core.applyMutation(ctx, t, content, new_content, verb);
+}
+
+pub fn cmdToggle(ctx: *Ctx, t: Target, content: []const u8, ids: [][]const u8, enable: bool) !void {
+    var ct = try model.parseCrontab(ctx.a, content);
+    var touched: usize = 0;
+    for (ids) |id| {
+        if (ct.findIndex(id)) |i| {
+            ct.items.items[i].job.enabled = enable;
+            touched += 1;
+        } else {
+            posix.eprint("looper: no managed job '{s}' on {s}\n", .{ id, t.label(ctx.a) });
+            ctx.fail(1);
+        }
+    }
+    if (touched == 0) return;
+    const new_content = try model.serialize(ctx.a, &ct);
+    const verb = try std.fmt.allocPrint(ctx.a, "{s} {d} job(s)", .{ if (enable) "enabled" else "disabled", touched });
+    try core.applyMutation(ctx, t, content, new_content, verb);
+}
+
+pub fn cmdEdit(ctx: *Ctx, t: Target, content: []const u8, id: []const u8, new_schedule: ?[]const u8, new_command: ?[]const u8) !void {
+    var ct = try model.parseCrontab(ctx.a, content);
+    const idx = ct.findIndex(id) orelse {
+        posix.eprint("looper: no managed job '{s}' on {s}\n", .{ id, t.label(ctx.a) });
+        posix.eprint("  (foreign jobs must be adopted with 'looper import' before editing)\n", .{});
+        ctx.fail(1);
+        return;
+    };
+    if (new_schedule) |raw| {
+        // Same NLP + validation chain as cmdAdd: surface the same errors
+        // and the same "interpreted as" disclosure so `edit` behaves
+        // identically to `add` for the schedule-update path.
+        const cron = nlp.toCron(ctx.a, raw) orelse {
+            posix.eprint("looper: couldn't read schedule '{s}'\n", .{raw});
+            posix.eprint("  use cron (\"*/15 9-17 * * 1-5\") or plain English (\"every weekday at 9am\")\n", .{});
+            posix.eprint("  preview with: looper explain '{s}'\n", .{raw});
+            ctx.fail(1);
+            return;
+        };
+        _ = sched_mod.parseSchedule(cron) catch |e| {
+            posix.eprint("looper: invalid schedule '{s}': {s}\n", .{ cron, @errorName(e) });
+            ctx.fail(1);
+            return;
+        };
+        if (!std.mem.eql(u8, cron, raw))
+            ctx.emit("{s}interpreted{s} \"{s}\" as {s}{s}{s}  ({s})\n", .{ ctx.k(colors.DIM), ctx.k(colors.RESET), raw, ctx.k(colors.BOLD), cron, ctx.k(colors.RESET), humanize.humanize(ctx.a, cron) });
+        ct.items.items[idx].job.schedule = cron;
+    }
+    if (new_command) |cmd| ct.items.items[idx].job.command = cmd;
+    const new_content = try model.serialize(ctx.a, &ct);
+    const verb = try std.fmt.allocPrint(ctx.a, "edited '{s}'", .{id});
+    try core.applyMutation(ctx, t, content, new_content, verb);
+}
+
+pub fn cmdRm(ctx: *Ctx, t: Target, content: []const u8, ids: [][]const u8) !void {
+    var ct = try model.parseCrontab(ctx.a, content);
+    var rm: std.ArrayList(usize) = .empty;
+    for (ids) |id| {
+        if (ct.findIndex(id)) |i| {
+            try rm.append(ctx.a, i);
+            continue;
+        }
+        if (id.len >= 2 and id[0] == 'f' and model.allDigits(id[1..])) {
+            const n = std.fmt.parseInt(usize, id[1..], 10) catch 0;
+            if (ct.findForeign(n)) |i| {
+                try rm.append(ctx.a, i);
+                continue;
+            }
+        }
+        posix.eprint("looper: no job '{s}' on {s}\n", .{ id, t.label(ctx.a) });
+        ctx.fail(1);
+    }
+    if (rm.items.len == 0) return;
+    if (!display.confirm(ctx, "Remove {d} job(s) from {s}?", .{ rm.items.len, t.label(ctx.a) })) {
+        ctx.emit("aborted\n", .{});
+        return;
+    }
+    var keep: std.ArrayList(model.Item) = .empty;
+    outer: for (ct.items.items, 0..) |it, idx| {
+        for (rm.items) |ri| if (ri == idx) continue :outer;
+        try keep.append(ctx.a, it);
+    }
+    ct.items = keep;
+    const new_content = try model.serialize(ctx.a, &ct);
+    const verb = try std.fmt.allocPrint(ctx.a, "removed {d} job(s)", .{rm.items.len});
+    try core.applyMutation(ctx, t, content, new_content, verb);
+}
+
+const testing = std.testing;
+
+fn tmpTarget(a: std.mem.Allocator) !Target {
+    const path = try std.fmt.allocPrint(a, "/tmp/looper-mutate-test-{x}.crontab", .{posix.nowEpoch()});
+    return Target{ .kind = .file, .path = path };
+}
+
+fn newCtx(a: std.mem.Allocator) Ctx {
+    return Ctx{ .a = a, .color = false, .yes = true };
+}
+
+test "cmdAdd then serialize contains a managed job" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo hi", "demo", false);
+    const got = try target_mod.readFileAll(a, tgt.path);
+    try testing.expect(std.mem.indexOf(u8, got, "#looper# id=demo enabled=1") != null);
+    try testing.expect(std.mem.indexOf(u8, got, "0 3 * * * /bin/echo hi") != null);
+}
+
+test "cmdToggle disables a job by commenting payload" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo hi", "demo", false);
+    const after_add = try target_mod.readFileAll(a, tgt.path);
+    var ids = [_][]const u8{"demo"};
+    try cmdToggle(&ctx, tgt, after_add, ids[0..], false);
+    const got = try target_mod.readFileAll(a, tgt.path);
+    try testing.expect(std.mem.indexOf(u8, got, "enabled=0") != null);
+    try testing.expect(std.mem.indexOf(u8, got, "# 0 3 * * * /bin/echo hi") != null);
+}
+
+test "cmdAdd is idempotent by id" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo first", "demo", false);
+    const c1 = try target_mod.readFileAll(a, tgt.path);
+    try cmdAdd(&ctx, tgt, c1, "0 4 * * *", "/bin/echo second", "demo", false);
+    const c2 = try target_mod.readFileAll(a, tgt.path);
+    // exactly one marker line — second add updated in place
+    var marker_count: usize = 0;
+    var it = std.mem.splitScalar(u8, c2, '\n');
+    while (it.next()) |line| if (std.mem.startsWith(u8, line, "#looper#")) {
+        marker_count += 1;
+    };
+    try testing.expectEqual(@as(usize, 1), marker_count);
+    try testing.expect(std.mem.indexOf(u8, c2, "0 4 * * * /bin/echo second") != null);
+    try testing.expect(std.mem.indexOf(u8, c2, "first") == null);
+}
+
+test "cmdEdit --schedule preserves command" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo original", "demo", false);
+    const after_add = try target_mod.readFileAll(a, tgt.path);
+    try cmdEdit(&ctx, tgt, after_add, "demo", "0 4 * * *", null);
+    const got = try target_mod.readFileAll(a, tgt.path);
+    try testing.expect(std.mem.indexOf(u8, got, "0 4 * * * /bin/echo original") != null);
+    try testing.expect(std.mem.indexOf(u8, got, "0 3 * * *") == null);
+}
+
+test "cmdEdit --command preserves schedule" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo original", "demo", false);
+    const after_add = try target_mod.readFileAll(a, tgt.path);
+    try cmdEdit(&ctx, tgt, after_add, "demo", null, "/bin/echo updated");
+    const got = try target_mod.readFileAll(a, tgt.path);
+    try testing.expect(std.mem.indexOf(u8, got, "0 3 * * * /bin/echo updated") != null);
+    try testing.expect(std.mem.indexOf(u8, got, "original") == null);
+}
+
+test "cmdEdit both flags update both fields" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo", false);
+    const after_add = try target_mod.readFileAll(a, tgt.path);
+    try cmdEdit(&ctx, tgt, after_add, "demo", "@hourly", "/bin/echo b");
+    const got = try target_mod.readFileAll(a, tgt.path);
+    try testing.expect(std.mem.indexOf(u8, got, "@hourly /bin/echo b") != null);
+}
+
+test "cmdEdit rejects unknown id with exit 1" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    try cmdEdit(&ctx, tgt, "", "no-such-job", "@daily", null);
+    try testing.expectEqual(@as(u8, 1), ctx.exit_code);
+}
+
+test "cmdEdit rejects foreign job (no marker) with exit 1" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    // Foreign job — no `#looper#` marker, so findIndex returns null
+    // even though it's a real cron line.
+    const foreign = "0 5 * * * /opt/legacy/job.sh\n";
+    try cmdEdit(&ctx, tgt, foreign, "legacy", "@daily", null);
+    try testing.expectEqual(@as(u8, 1), ctx.exit_code);
+}
+
+test "cmdEdit rejects invalid schedule" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo", false);
+    const after_add = try target_mod.readFileAll(a, tgt.path);
+    try cmdEdit(&ctx, tgt, after_add, "demo", "not a real schedule and not English either", null);
+    try testing.expectEqual(@as(u8, 1), ctx.exit_code);
+    // File content must be unchanged after a rejected edit.
+    const got = try target_mod.readFileAll(a, tgt.path);
+    try testing.expectEqualStrings(after_add, got);
+}
+
+test "cmdEdit accepts an @macro schedule" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    const tgt = try tmpTarget(a);
+    defer _ = posix.c.unlink((a.dupeZ(u8, tgt.path) catch unreachable).ptr);
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/echo a", "demo", false);
+    const after_add = try target_mod.readFileAll(a, tgt.path);
+    try cmdEdit(&ctx, tgt, after_add, "demo", "@daily", null);
+    const got = try target_mod.readFileAll(a, tgt.path);
+    // nlp passes already-valid cron (including @macros) through unchanged.
+    try testing.expect(std.mem.indexOf(u8, got, "@daily /bin/echo a") != null);
+}
+
+test "cmdAdd local+missing+check_command emits the yellow ! warning" {
+    // dry_run=true keeps applyMutation from invoking `crontab` for the
+    // local target — the probe still runs (it doesn't depend on the
+    // dry-run flag) and the warning emits to the buffer.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    ctx.color = false;
+    ctx.dry_run = true;
+    const tgt: Target = .{ .kind = .local };
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/zzz/almost/certainly/not/here", "demo", true);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "not found on local") != null);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "/zzz/almost/certainly/not/here") != null);
+}
+
+test "cmdAdd local+found+check_command emits NO warning (binary exists)" {
+    // Positive control: `/bin/sh` exists everywhere this test would
+    // run, so the probe returns .found and the warning path is silent.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    ctx.color = false;
+    ctx.dry_run = true;
+    const tgt: Target = .{ .kind = .local };
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/bin/sh -c 'echo hi'", "demo", true);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "not found") == null);
+}
+
+test "cmdAdd local+missing+check_command under --json suppresses the warning" {
+    // The "! command not found" line is non-JSON text; under --json it
+    // would corrupt structured stdout, so it must be silenced. We use
+    // a .local target so the probe actually runs and returns .missing
+    // — under --json + .file the test would pass trivially.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    ctx.json = true;
+    ctx.dry_run = true;
+    const tgt: Target = .{ .kind = .local };
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/zzz/almost/certainly/not/here", "demo", true);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "not found") == null);
+}
+
+test "cmdAdd local+missing+check_command under --quiet suppresses the warning" {
+    // --quiet means "diagnostic output off"; the preflight is a
+    // diagnostic, not a hard error, so it goes silent too.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    ctx.color = false;
+    ctx.quiet = true;
+    ctx.dry_run = true;
+    const tgt: Target = .{ .kind = .local };
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/zzz/almost/certainly/not/here", "demo", true);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "not found") == null);
+}
+
+test "cmdAdd check_command=false does not probe at all" {
+    // Default path: even with a missing binary, no warning fires when
+    // the user didn't opt in. Pins the "no behaviour change without
+    // the flag" contract from the commit message.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    ctx.color = false;
+    ctx.dry_run = true;
+    const tgt: Target = .{ .kind = .local };
+    try cmdAdd(&ctx, tgt, "", "0 3 * * *", "/zzz/missing", "demo", false);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "not found") == null);
+}

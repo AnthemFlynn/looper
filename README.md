@@ -5,8 +5,8 @@ user, across remote hosts over **ssh**, or in a plain crontab file. One job,
 done well: **manage cron jobs**. It speaks standard 5-field cron plus the
 `@macros` cron already understands; it never invents a scheduler syntax.
 
-Modular Zig 0.16 codebase under `src/` (~1900 lines total), no dependencies
-beyond libc, static binaries for every box in a mixed-arch fleet.
+Modular Zig 0.16 codebase under `src/`, no dependencies beyond libc, static
+binaries for every box in a mixed-arch fleet.
 
 ```
 $ looper ls
