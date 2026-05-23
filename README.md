@@ -33,23 +33,34 @@ here maps to one of them:
 
 ## Install
 
-Build it with Zig 0.16+ (only libc is needed):
+Requires Zig 0.16+ (only libc is needed; no other dependencies).
 
 ```sh
-zig build -Doptimize=ReleaseSafe
-install -m755 zig-out/bin/looper ~/.local/bin/looper
+git clone https://github.com/<you>/looper && cd looper
+make install                    # → ~/.local/bin/looper
+looper --help
 ```
 
-Or use a prebuilt binary from this folder:
+`make install` runs `zig build -Doptimize=ReleaseSafe --prefix ~/.local`,
+which is what the rule expands to. Override the prefix with `PREFIX=`:
 
-- `looper` — native Linux x86_64 (stripped, 376K)
-- `looper-x86_64-linux-musl` — fully static, any x86_64 Linux/container
-- `looper-aarch64-linux-musl` — fully static, Raspberry Pi / ARM Linux
-- `looper-aarch64-macos` — Apple Silicon (Mac mini M-series)
+```sh
+make install PREFIX=/usr/local        # system-wide
+make install PREFIX=$HOME/bin         # somewhere else
+```
+
+If the install location isn't on your `$PATH`, the rule prints exactly the
+`export PATH=...` line to add to your shell rc, so you don't have to guess.
+
+Prefer the raw Zig invocation? It's equivalent:
+
+```sh
+zig build -Doptimize=ReleaseSafe --prefix ~/.local
+```
 
 ### Cross-compiling for a whole fleet
 
-Zig cross-compiles from any host. To rebuild every target:
+Zig cross-compiles from any host. To rebuild every target into `zig-out/bin/`:
 
 ```sh
 zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl
@@ -58,7 +69,8 @@ zig build -Doptimize=ReleaseSafe -Dtarget=aarch64-macos
 ```
 
 The `*-linux-musl` builds are statically linked — copy them to a Pi and run,
-no runtime, no libc version to match.
+no runtime, no libc version to match. Drop the binary into `~/.local/bin/looper`
+(or `/usr/local/bin/looper`) on the target host; that's the whole deployment.
 
 ## Usage
 
@@ -372,7 +384,8 @@ for target-zone), the Vixie DOM/DOW OR-rule, and the timezone probe parser
 are all covered by inline unit tests colocated with each module. Run them with:
 
 ```sh
-zig build test
+make test                # zig build test
+make itest               # end-to-end script against /tmp/looper-itest-$$
 ```
 
 ## License
