@@ -13,6 +13,19 @@ pub const Job = struct {
     schedule: []const u8,
     command: []const u8,
     foreign: bool = false,
+    /// One-shot: fires once at the scheduled time, then `_exec` removes
+    /// the job from the crontab. The cron schedule (M H D Mo *) still
+    /// repeats annually, so self-removal is what makes it "once".
+    once: bool = false,
+    /// When set, the cron payload is a `looper _exec --run-id=X --` wrapper
+    /// that captures stdout/stderr to `state_dir/runs/<run_id>/`. For
+    /// recurring jobs with capture, `_exec` generates a fresh run_id per
+    /// invocation; the marker's run_id is just the "series" anchor.
+    capture: bool = false,
+    /// Series anchor for one-shots; null for plain recurring jobs.
+    run_id: ?[]const u8 = null,
+    /// Max wall-clock seconds before `_exec` kills the child. Null = no limit.
+    timeout_secs: ?u32 = null,
 };
 
 pub const Item = union(enum) {
@@ -91,18 +104,48 @@ pub fn isEnvAssignment(line: []const u8) bool {
     return false;
 }
 
-pub const Marker = struct { id: []const u8, enabled: bool };
+pub const Marker = struct {
+    id: []const u8,
+    enabled: bool,
+    once: bool = false,
+    capture: bool = false,
+    run_id: ?[]const u8 = null,
+    timeout_secs: ?u32 = null,
+};
+
 pub fn parseMarker(a: std.mem.Allocator, line: []const u8) ?Marker {
     if (!std.mem.startsWith(u8, line, MARKER)) return null;
     var id: []const u8 = "";
     var enabled = true;
+    var once = false;
+    var capture = false;
+    var run_id: ?[]const u8 = null;
+    var timeout_secs: ?u32 = null;
     var it = std.mem.tokenizeAny(u8, line[MARKER.len..], " \t");
     while (it.next()) |tok| {
         if (std.mem.startsWith(u8, tok, "id=")) id = a.dupe(u8, tok[3..]) catch tok[3..];
         if (std.mem.startsWith(u8, tok, "enabled=")) enabled = std.mem.eql(u8, tok[8..], "1");
+        if (std.mem.startsWith(u8, tok, "once=")) once = std.mem.eql(u8, tok[5..], "1");
+        if (std.mem.startsWith(u8, tok, "capture=")) capture = std.mem.eql(u8, tok[8..], "1");
+        if (std.mem.startsWith(u8, tok, "run_id=")) run_id = a.dupe(u8, tok[7..]) catch tok[7..];
+        if (std.mem.startsWith(u8, tok, "timeout_secs=")) timeout_secs = std.fmt.parseInt(u32, tok[13..], 10) catch null;
     }
     if (id.len == 0) return null;
-    return .{ .id = id, .enabled = enabled };
+    return .{ .id = id, .enabled = enabled, .once = once, .capture = capture, .run_id = run_id, .timeout_secs = timeout_secs };
+}
+
+/// Reconstructs a marker line from its struct form. Used by both the
+/// serializer and the parser's fallback paths so the format lives in
+/// exactly one place. Optional attributes are omitted when not set,
+/// keeping byte-stable round-trip for plain (non-once, non-capture) jobs.
+pub fn serializeMarker(a: std.mem.Allocator, m: Marker) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    ctx_mod.aw(a, &out, "{s} id={s} enabled={d}", .{ MARKER, m.id, @as(u8, if (m.enabled) 1 else 0) });
+    if (m.once) ctx_mod.aw(a, &out, " once=1", .{});
+    if (m.capture) ctx_mod.aw(a, &out, " capture=1", .{});
+    if (m.run_id) |rid| ctx_mod.aw(a, &out, " run_id={s}", .{rid});
+    if (m.timeout_secs) |t| ctx_mod.aw(a, &out, " timeout_secs={d}", .{t});
+    return out.toOwnedSlice(a);
 }
 
 pub fn parseCrontab(a: std.mem.Allocator, text: []const u8) !Crontab {
@@ -119,9 +162,18 @@ pub fn parseCrontab(a: std.mem.Allocator, text: []const u8) !Crontab {
                 if (std.mem.startsWith(u8, t, "#")) payload = std.mem.trimStart(u8, t[1..], " \t");
             }
             if (splitScheduleCommand(payload)) |sc| {
-                try ct.items.append(a, .{ .job = .{ .id = pm.id, .enabled = pm.enabled, .schedule = try a.dupe(u8, sc.sched), .command = try a.dupe(u8, sc.cmd) } });
+                try ct.items.append(a, .{ .job = .{
+                    .id = pm.id,
+                    .enabled = pm.enabled,
+                    .schedule = try a.dupe(u8, sc.sched),
+                    .command = try a.dupe(u8, sc.cmd),
+                    .once = pm.once,
+                    .capture = pm.capture,
+                    .run_id = pm.run_id,
+                    .timeout_secs = pm.timeout_secs,
+                } });
             } else {
-                try ct.items.append(a, .{ .raw = try std.fmt.allocPrint(a, "{s} id={s} enabled={d}", .{ MARKER, pm.id, @as(u8, if (pm.enabled) 1 else 0) }) });
+                try ct.items.append(a, .{ .raw = try serializeMarker(a, pm) });
                 try ct.items.append(a, .{ .raw = try a.dupe(u8, line) });
             }
             pending = null;
@@ -140,7 +192,7 @@ pub fn parseCrontab(a: std.mem.Allocator, text: []const u8) !Crontab {
         }
         try ct.items.append(a, .{ .raw = try a.dupe(u8, line) });
     }
-    if (pending) |pm| try ct.items.append(a, .{ .raw = try std.fmt.allocPrint(a, "{s} id={s} enabled={d}", .{ MARKER, pm.id, @as(u8, if (pm.enabled) 1 else 0) }) });
+    if (pending) |pm| try ct.items.append(a, .{ .raw = try serializeMarker(a, pm) });
     if (ct.items.items.len > 0) {
         const last = ct.items.items[ct.items.items.len - 1];
         if (last == .raw and last.raw.len == 0) _ = ct.items.pop();
@@ -159,7 +211,16 @@ pub fn serialize(a: std.mem.Allocator, ct: *Crontab) ![]u8 {
             if (j.foreign) {
                 ctx_mod.aw(a, &out, "{s} {s}\n", .{ j.schedule, j.command });
             } else {
-                ctx_mod.aw(a, &out, "{s} id={s} enabled={d}\n", .{ MARKER, j.id, @as(u8, if (j.enabled) 1 else 0) });
+                const marker_line = try serializeMarker(a, .{
+                    .id = j.id,
+                    .enabled = j.enabled,
+                    .once = j.once,
+                    .capture = j.capture,
+                    .run_id = j.run_id,
+                    .timeout_secs = j.timeout_secs,
+                });
+                try out.appendSlice(a, marker_line);
+                try out.append(a, '\n');
                 if (j.enabled) ctx_mod.aw(a, &out, "{s} {s}\n", .{ j.schedule, j.command }) else ctx_mod.aw(a, &out, "# {s} {s}\n", .{ j.schedule, j.command });
             }
         },
@@ -323,4 +384,160 @@ test "Crontab findIndex finds managed by id, skips foreign" {
     try testing.expectEqual(@as(?usize, 0), ct.findIndex("foo"));
     try testing.expectEqual(@as(?usize, null), ct.findIndex("nope"));
     try testing.expectEqual(@as(?usize, 1), ct.findForeign(1));
+}
+
+// ---------------------------------------------------------------------------
+// Forward-compat: extended marker attributes (once, capture, run_id, timeout_secs)
+// ---------------------------------------------------------------------------
+
+test "parseMarker old-style (id+enabled only) defaults new fields" {
+    // The contract: an existing crontab written by a pre-extension looper
+    // continues to parse, with the new attributes taking their type defaults.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const m = parseMarker(arena.allocator(), "#looper# id=demo enabled=1").?;
+    try testing.expectEqualStrings("demo", m.id);
+    try testing.expect(m.enabled);
+    try testing.expect(!m.once);
+    try testing.expect(!m.capture);
+    try testing.expectEqual(@as(?[]const u8, null), m.run_id);
+    try testing.expectEqual(@as(?u32, null), m.timeout_secs);
+}
+
+test "parseMarker reads once + capture + run_id + timeout_secs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const m = parseMarker(
+        arena.allocator(),
+        "#looper# id=test once=1 capture=1 run_id=abc123 timeout_secs=300 enabled=1",
+    ).?;
+    try testing.expectEqualStrings("test", m.id);
+    try testing.expect(m.enabled);
+    try testing.expect(m.once);
+    try testing.expect(m.capture);
+    try testing.expectEqualStrings("abc123", m.run_id.?);
+    try testing.expectEqual(@as(?u32, 300), m.timeout_secs);
+}
+
+test "parseMarker token order is insensitive" {
+    // Whichever order the writer used, the parser must extract the same struct.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m1 = parseMarker(a, "#looper# id=x enabled=1 once=1 run_id=r1").?;
+    const m2 = parseMarker(a, "#looper# run_id=r1 once=1 id=x enabled=1").?;
+    try testing.expectEqualStrings(m1.id, m2.id);
+    try testing.expectEqual(m1.enabled, m2.enabled);
+    try testing.expectEqual(m1.once, m2.once);
+    try testing.expectEqualStrings(m1.run_id.?, m2.run_id.?);
+}
+
+test "parseMarker ignores unknown tokens (forward-compat from v2+ crontabs)" {
+    // If a future looper version writes new attributes we don't understand,
+    // we must keep parsing — drop the unknowns, retain the rest.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const m = parseMarker(
+        arena.allocator(),
+        "#looper# id=x enabled=1 future_attr=42 also_unknown=hello once=1",
+    ).?;
+    try testing.expectEqualStrings("x", m.id);
+    try testing.expect(m.enabled);
+    try testing.expect(m.once);
+}
+
+test "parseMarker rejects malformed timeout_secs gracefully" {
+    // parseInt errors should surface as a null timeout, not a crash.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const m = parseMarker(arena.allocator(), "#looper# id=x enabled=1 timeout_secs=not-a-number").?;
+    try testing.expectEqual(@as(?u32, null), m.timeout_secs);
+}
+
+test "serializeMarker omits unset attributes (old jobs stay byte-stable)" {
+    // The first half of the forward-compat contract: a job that doesn't use
+    // the new fields must serialize to the exact bytes a pre-extension
+    // looper would have written.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const out = try serializeMarker(a, .{ .id = "demo", .enabled = true });
+    try testing.expectEqualStrings("#looper# id=demo enabled=1", out);
+}
+
+test "serializeMarker emits all set attributes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const out = try serializeMarker(a, .{
+        .id = "demo",
+        .enabled = true,
+        .once = true,
+        .capture = true,
+        .run_id = "abc123",
+        .timeout_secs = 300,
+    });
+    try testing.expectEqualStrings(
+        "#looper# id=demo enabled=1 once=1 capture=1 run_id=abc123 timeout_secs=300",
+        out,
+    );
+}
+
+test "parseCrontab propagates extended attrs into Job" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const input =
+        \\#looper# id=oneshot enabled=1 once=1 capture=1 run_id=r-42 timeout_secs=120
+        \\57 14 23 5 * /usr/local/bin/looper _exec --run-id=r-42 -- /bin/echo hi
+        \\
+    ;
+    const ct = try parseCrontab(a, input);
+    try testing.expectEqual(@as(usize, 1), ct.items.items.len);
+    switch (ct.items.items[0]) {
+        .job => |j| {
+            try testing.expectEqualStrings("oneshot", j.id);
+            try testing.expect(j.enabled);
+            try testing.expect(j.once);
+            try testing.expect(j.capture);
+            try testing.expectEqualStrings("r-42", j.run_id.?);
+            try testing.expectEqual(@as(?u32, 120), j.timeout_secs);
+        },
+        else => return error.UnexpectedItem,
+    }
+}
+
+test "serialize roundtrip preserves new attributes byte-for-byte" {
+    // The second half of the forward-compat contract: a job that DOES use
+    // the new fields round-trips through parse → serialize → bytes unchanged.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const input =
+        \\#looper# id=oneshot enabled=1 once=1 capture=1 run_id=r-42 timeout_secs=120
+        \\57 14 23 5 * /usr/local/bin/looper _exec --run-id=r-42 -- /bin/echo hi
+        \\
+    ;
+    var ct = try parseCrontab(a, input);
+    const out = try serialize(a, &ct);
+    try testing.expectEqualStrings(input, out);
+}
+
+test "serialize roundtrip mixed (old + new) markers preserves bytes" {
+    // Realistic transition state: a crontab with both pre-extension jobs and
+    // new one-shot jobs side-by-side must round-trip without either side
+    // bleeding into the other's serialization.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const input =
+        \\#looper# id=daily-backup enabled=1
+        \\0 3 * * * /usr/local/bin/backup.sh
+        \\#looper# id=test-run enabled=1 once=1 run_id=abc
+        \\57 14 23 5 * /usr/local/bin/looper _exec --run-id=abc -- /bin/echo hi
+        \\
+    ;
+    var ct = try parseCrontab(a, input);
+    const out = try serialize(a, &ct);
+    try testing.expectEqualStrings(input, out);
 }
