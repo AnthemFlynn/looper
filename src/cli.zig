@@ -81,6 +81,18 @@ pub const ParsedArgs = struct {
     bad_option: ?[]const u8,
 };
 
+/// Match `--name=value` style. Returns the value substring if `arg` is
+/// exactly `name=<value>` (POSIX getopt equals-form). Pure helper; the
+/// space-form `--name value` is still handled by the surrounding
+/// `std.mem.eql` checks. Both forms must be supported because cron-
+/// generated invocations (and external scripts) commonly use equals.
+fn equalsValue(arg: []const u8, name: []const u8) ?[]const u8 {
+    if (arg.len > name.len + 1 and std.mem.startsWith(u8, arg, name) and arg[name.len] == '=') {
+        return arg[name.len + 1 ..];
+    }
+    return null;
+}
+
 /// Parse `argv` (with `argv[0]` being the program name, skipped) into a
 /// ParsedArgs bag. Flag booleans on `ctx` are mutated in place. On an
 /// unknown option, `bad_option` is set and parsing stops; the caller
@@ -122,40 +134,59 @@ pub fn parseArgv(a: std.mem.Allocator, argv: []const []const u8, ctx: *ctx_mod.C
             while (i < argv.len) : (i += 1) try positionals.append(a, argv[i]);
             break;
         }
-        // Options that take a value.
+        // Options that take a value. Each accepts BOTH the POSIX
+        // space-form (`--foo value`) and the equals-form (`--foo=value`).
+        // Cron-generated invocations and many external tools use equals;
+        // a parser supporting only spaces silently rejected them.
+        if (equalsValue(arg, "--host")) |v| { try hosts.append(a, v); continue; }
         if (std.mem.eql(u8, arg, "-H") or std.mem.eql(u8, arg, "--host")) {
             i += 1;
             if (i < argv.len) try hosts.append(a, argv[i]);
             continue;
         }
+        if (equalsValue(arg, "--user")) |v| { p.user = v; continue; }
         if (std.mem.eql(u8, arg, "-u") or std.mem.eql(u8, arg, "--user")) {
             i += 1;
             if (i < argv.len) p.user = argv[i];
             continue;
         }
+        if (equalsValue(arg, "--file")) |v| { p.file_path = v; continue; }
         if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--file")) {
             i += 1;
             if (i < argv.len) p.file_path = argv[i];
             continue;
         }
+        if (equalsValue(arg, "--id")) |v| { p.want_id = v; continue; }
         if (std.mem.eql(u8, arg, "--id")) {
             i += 1;
             if (i < argv.len) p.want_id = argv[i];
             continue;
         }
+        if (equalsValue(arg, "--schedule")) |v| { p.new_schedule = v; continue; }
         if (std.mem.eql(u8, arg, "--schedule")) {
             i += 1;
             if (i < argv.len) p.new_schedule = argv[i];
             continue;
         }
+        if (equalsValue(arg, "--command")) |v| { p.new_command = v; continue; }
         if (std.mem.eql(u8, arg, "--command")) {
             i += 1;
             if (i < argv.len) p.new_command = argv[i];
             continue;
         }
+        if (equalsValue(arg, "--from")) |v| { p.from_stamp = v; continue; }
         if (std.mem.eql(u8, arg, "--from")) {
             i += 1;
             if (i < argv.len) p.from_stamp = argv[i];
+            continue;
+        }
+        if (equalsValue(arg, "--keep")) |v| {
+            p.keep = std.fmt.parseInt(usize, v, 10) catch {
+                p.bad_option = v;
+                p.positionals = try positionals.toOwnedSlice(a);
+                p.hosts = try hosts.toOwnedSlice(a);
+                return p;
+            };
             continue;
         }
         if (std.mem.eql(u8, arg, "--keep")) {
@@ -211,14 +242,25 @@ pub fn parseArgv(a: std.mem.Allocator, argv: []const []const u8, ctx: *ctx_mod.C
             p.capture = true;
             continue;
         }
+        if (equalsValue(arg, "--run-id")) |v| { p.run_id = v; continue; }
         if (std.mem.eql(u8, arg, "--run-id")) {
             i += 1;
             if (i < argv.len) p.run_id = argv[i];
             continue;
         }
+        if (equalsValue(arg, "--source-id")) |v| { p.source_id = v; continue; }
         if (std.mem.eql(u8, arg, "--source-id")) {
             i += 1;
             if (i < argv.len) p.source_id = argv[i];
+            continue;
+        }
+        if (equalsValue(arg, "--timeout-secs")) |v| {
+            p.timeout_secs = std.fmt.parseInt(u32, v, 10) catch {
+                p.bad_option = v;
+                p.positionals = try positionals.toOwnedSlice(a);
+                p.hosts = try hosts.toOwnedSlice(a);
+                return p;
+            };
             continue;
         }
         if (std.mem.eql(u8, arg, "--timeout-secs")) {
@@ -236,6 +278,7 @@ pub fn parseArgv(a: std.mem.Allocator, argv: []const []const u8, ctx: *ctx_mod.C
             }
             continue;
         }
+        if (equalsValue(arg, "--target-label")) |v| { p.target_label = v; continue; }
         if (std.mem.eql(u8, arg, "--target-label")) {
             i += 1;
             if (i < argv.len) p.target_label = argv[i];
@@ -245,9 +288,19 @@ pub fn parseArgv(a: std.mem.Allocator, argv: []const []const u8, ctx: *ctx_mod.C
             p.once_flag = true;
             continue;
         }
+        if (equalsValue(arg, "--status")) |v| { p.status_filter = v; continue; }
         if (std.mem.eql(u8, arg, "--status")) {
             i += 1;
             if (i < argv.len) p.status_filter = argv[i];
+            continue;
+        }
+        if (equalsValue(arg, "--older-than")) |v| {
+            p.older_than_secs = std.fmt.parseInt(i64, v, 10) catch {
+                p.bad_option = v;
+                p.positionals = try positionals.toOwnedSlice(a);
+                p.hosts = try hosts.toOwnedSlice(a);
+                return p;
+            };
             continue;
         }
         if (std.mem.eql(u8, arg, "--older-than")) {
@@ -577,6 +630,40 @@ test "parseArgv --target-label captures value" {
     const argv = [_][]const u8{ "looper", "_exec", "--target-label", "local" };
     const p = try parseArgv(arena.allocator(), &argv, &ctx);
     try testing.expectEqualStrings("local", p.target_label.?);
+}
+
+test "parseArgv accepts --name=value form (cron-generated invocations)" {
+    // Cron emits wrapper lines that use the equals form for every
+    // value-taking flag — the parser must accept both. Without this,
+    // every cron-fired one-shot would die with "unknown option".
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = newCtx(arena.allocator());
+    const argv = [_][]const u8{
+        "looper",                                   "_exec",
+        "--run-id=abc-123",                         "--source-id=daily-backup",
+        "--timeout-secs=60",                        "--target-label=local",
+        "--",                                       "/bin/sh",
+        "-c",                                       "echo hi",
+    };
+    const p = try parseArgv(arena.allocator(), &argv, &ctx);
+    try testing.expectEqualStrings("abc-123", p.run_id.?);
+    try testing.expectEqualStrings("daily-backup", p.source_id.?);
+    try testing.expectEqual(@as(?u32, 60), p.timeout_secs);
+    try testing.expectEqualStrings("local", p.target_label.?);
+    try testing.expectEqual(@as(usize, 4), p.positionals.len);
+}
+
+test "parseArgv equals form rejects non-numeric --timeout-secs" {
+    // Same hard-error behavior as the space form: parser flags bad
+    // values rather than letting them flow to the command.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = newCtx(arena.allocator());
+    const argv = [_][]const u8{ "looper", "_exec", "--timeout-secs=nope" };
+    const p = try parseArgv(arena.allocator(), &argv, &ctx);
+    try testing.expect(p.bad_option != null);
+    try testing.expectEqualStrings("nope", p.bad_option.?);
 }
 
 test "parseArgv full _exec invocation parses cleanly" {
