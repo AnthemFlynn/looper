@@ -4,6 +4,11 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Vendored third-party libraries (see vendor/README.md).
+    const kairoz_mod = b.addModule("kairoz", .{
+        .root_source_file = b.path("vendor/kairoz/root.zig"),
+    });
+
     const exe = b.addExecutable(.{
         .name = "looper",
         .root_module = b.createModule(.{
@@ -11,6 +16,9 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
+            .imports = &.{
+                .{ .name = "kairoz", .module = kairoz_mod },
+            },
         }),
     });
     b.installArtifact(exe);
@@ -26,6 +34,9 @@ pub fn build(b: *std.Build) void {
             .target = b.graph.host,
             .optimize = optimize,
             .link_libc = true,
+            .imports = &.{
+                .{ .name = "kairoz", .module = kairoz_mod },
+            },
         }),
     });
     const run_tests = b.addRunArtifact(tests);

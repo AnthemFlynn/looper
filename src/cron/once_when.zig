@@ -1,7 +1,7 @@
 //! Convert natural-language temporal expressions into absolute UTC epoch
 //! seconds, suitable for `looper once <when> <cmd>`.
 //!
-//! Delegates the parse to vendored Kairoz (cron/kairoz/), which owns the
+//! Delegates the parse to vendored Kairoz (vendor/kairoz/), which owns the
 //! grammar. This module is a thin shim that:
 //!   - Builds a controller-local DateTime reference from `now_epoch_utc`
 //!     + `tz_offset_secs` so Kairoz can anchor relative inputs ("in 5 min",
@@ -19,7 +19,7 @@
 //!   utc_epoch + tz_offset_secs = local_epoch.
 
 const std = @import("std");
-const kairoz = @import("kairoz/root.zig");
+const kairoz = @import("kairoz");
 
 /// Minimum seconds between "now" and the target firing time. Cron only
 /// resolves to the next minute boundary, so scheduling "in 5 sec" is
