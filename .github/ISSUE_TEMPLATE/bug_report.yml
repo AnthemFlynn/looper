@@ -1,0 +1,74 @@
+name: Bug report
+description: Something in looper is broken
+title: "bug: <short summary>"
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Minimal command(s) that reproduce the issue. If it involves a crontab file, paste it (redact anything sensitive).
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: looper-version
+    attributes:
+      label: looper version
+      description: Output of `looper --version`, or the commit SHA you built from.
+    validations:
+      required: true
+
+  - type: input
+    id: zig-version
+    attributes:
+      label: Zig version
+      description: Output of `zig version`. Looper targets Zig 0.16.
+    validations:
+      required: false
+
+  - type: input
+    id: os
+    attributes:
+      label: OS / arch
+      description: e.g. `macOS 14.5 arm64`, `Ubuntu 22.04 x86_64`, `Alpine 3.19 musl`.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: target
+    attributes:
+      label: Target type
+      description: Which backend reproduces the bug?
+      options:
+        - local
+        - remote (-H)
+        - file (-f)
+        - --all
+        - any / unsure
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / output
+      description: Relevant output. Include `--verbose` if applicable, and the contents of `doctor` if it might be relevant.
+      render: shell
+    validations:
+      required: false

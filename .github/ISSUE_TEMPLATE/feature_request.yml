@@ -1,0 +1,52 @@
+name: Feature request
+description: Propose a new capability for looper
+title: "feat(<area>): <short summary>"
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing an improvement. Keep the focus narrow — looper is a tool for *managing cronjobs*. Features that widen scope (becoming a scheduler, a daemon, a job runner) are unlikely to land.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What pain does this solve? Who feels it? What do they do today instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed
+      description: Shape of the feature. Sketch the CLI surface, the data flow, the rough mechanism. Pseudocode is fine; full design isn't required.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Bulleted checklist of what "done" looks like. Be concrete enough that someone else can implement it.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+      description: What this issue is explicitly NOT doing. Naming exclusions prevents scope creep.
+    validations:
+      required: true
+
+  - type: textarea
+    id: open-questions
+    attributes:
+      label: Open questions
+      description: Unresolved tradeoffs the implementer needs to make a call on. Optional.
+    validations:
+      required: false
