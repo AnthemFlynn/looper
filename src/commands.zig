@@ -80,4 +80,8 @@ test {
     _ = preflight;
     _ = runs;
     _ = exec;
+    // cron/once_when.zig isn't yet imported by any command (Task #7's
+    // commands/once.zig will be its natural consumer). Anchor it here
+    // so its inline tests are discovered. Remove this when once lands.
+    _ = @import("cron/once_when.zig");
 }
