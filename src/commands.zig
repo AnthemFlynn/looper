@@ -23,6 +23,7 @@ const doctor = @import("commands/doctor.zig");
 const preflight = @import("commands/preflight.zig");
 const runs = @import("commands/runs.zig");
 const exec = @import("commands/exec.zig");
+const once = @import("commands/once.zig");
 
 // core
 pub const applyMutation = core.applyMutation;
@@ -68,6 +69,10 @@ pub const parseRunsStatusFilter = runs.parseStatusFilter;
 // exec
 pub const cmdExec = exec.cmdExec;
 
+// once
+pub const cmdScheduleOnce = once.cmdScheduleOnce;
+pub const OnceOpts = once.OnceOpts;
+
 // Ensure the test harness compiles every submodule. `main.zig`'s
 // test {} block imports this file, so anything referenced here gets
 // pulled into the test binary.
@@ -80,8 +85,5 @@ test {
     _ = preflight;
     _ = runs;
     _ = exec;
-    // cron/once_when.zig isn't yet imported by any command (Task #7's
-    // commands/once.zig will be its natural consumer). Anchor it here
-    // so its inline tests are discovered. Remove this when once lands.
-    _ = @import("cron/once_when.zig");
+    _ = once;
 }
