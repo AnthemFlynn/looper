@@ -165,6 +165,56 @@ pub fn parseMarker(a: std.mem.Allocator, line: []const u8) ?Marker {
 /// is the user's command, single-quoted for shell-safety.
 const WRAPPER_INNER_SENTINEL = " -- /bin/sh -c ";
 
+/// Cron treats `%` in the command portion as a literal newline (man 5
+/// crontab), splitting the command and turning everything after into
+/// stdin. The only way to pass a literal `%` to the shell is to write
+/// `\%` in the crontab — cron strips the `\` before invoking sh.
+///
+/// This is invisible to single-quote shell quoting (which doesn't escape
+/// `%`), so a perfectly valid shell-quoted command like `'$(date +%H)'`
+/// gets eaten by cron before sh ever sees it. We post-escape after
+/// shellQuote so the on-disk crontab carries `\%` and round-trips back
+/// to `%` via cronUnescape on parse.
+fn cronEscape(a: std.mem.Allocator, s: []const u8) ![]u8 {
+    var count: usize = 0;
+    for (s) |ch| if (ch == '%') {
+        count += 1;
+    };
+    if (count == 0) return a.dupe(u8, s);
+    var out = try a.alloc(u8, s.len + count);
+    var j: usize = 0;
+    for (s) |ch| {
+        if (ch == '%') {
+            out[j] = '\\';
+            out[j + 1] = '%';
+            j += 2;
+        } else {
+            out[j] = ch;
+            j += 1;
+        }
+    }
+    return out;
+}
+
+/// Inverse of cronEscape: turn `\%` back into `%`. Only `\%` is unescaped
+/// — other backslash sequences (`\\`, `\n`, etc.) are left alone, since
+/// cron's escaping rule applies only to `%`. Lone `\` followed by anything
+/// other than `%` stays literal.
+fn cronUnescape(a: std.mem.Allocator, s: []const u8) ![]u8 {
+    if (std.mem.indexOf(u8, s, "\\%") == null) return a.dupe(u8, s);
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (i + 1 < s.len and s[i] == '\\' and s[i + 1] == '%') {
+            try out.append(a, '%');
+            i += 1; // skip the %; outer loop's i+=1 skips the \
+        } else {
+            try out.append(a, s[i]);
+        }
+    }
+    return out.toOwnedSlice(a);
+}
+
 /// Synthesize a wrapped cron payload from a Job's marker attributes.
 /// Returns `error.NoWrapperBin` if the job is marked wrapped but its
 /// wrapper_bin is null — should never happen for jobs written by looper,
@@ -196,7 +246,11 @@ pub fn wrapCommand(a: std.mem.Allocator, j: Job) ![]u8 {
     try out.appendSlice(a, WRAPPER_INNER_SENTINEL);
     const quoted = posix.shellQuote(a, j.command);
     try out.appendSlice(a, quoted);
-    return out.toOwnedSlice(a);
+    const payload = try out.toOwnedSlice(a);
+    // Final cron-level escape on the whole payload. The wrapper portion
+    // (path + flags) rarely contains `%`, but escaping universally is
+    // cheap and keeps the rule "no raw `%` survives into the crontab".
+    return cronEscape(a, payload);
 }
 
 /// Inverse of `wrapCommand`: extract the inner command from a wrapped
@@ -204,10 +258,14 @@ pub fn wrapCommand(a: std.mem.Allocator, j: Job) ![]u8 {
 /// displaying the raw payload, which is at least informative even if
 /// ugly. The sentinel-based split tolerates flag variation; only the
 /// final " -- /bin/sh -c '...'" tail has to match.
+///
+/// Reverses cronEscape's `%` → `\%` substitution AFTER shellUnquote so
+/// the user's command surfaces in its original form.
 pub fn tryUnwrapInner(a: std.mem.Allocator, payload: []const u8) ?[]const u8 {
     const start = std.mem.indexOf(u8, payload, WRAPPER_INNER_SENTINEL) orelse return null;
     const after = payload[start + WRAPPER_INNER_SENTINEL.len ..];
-    return posix.shellUnquote(a, after);
+    const quoted_inner = posix.shellUnquote(a, after) orelse return null;
+    return cronUnescape(a, quoted_inner) catch null;
 }
 
 /// Reconstructs a marker line from its struct form. Used by both the
@@ -682,6 +740,61 @@ test "wrapCommand shell-quotes commands with embedded single quotes" {
         "/usr/local/bin/looper _exec --source-id=msg -- /bin/sh -c 'echo it'\\''s tuesday'",
         out,
     );
+}
+
+test "wrapCommand escapes % to \\% (cron's newline trigger)" {
+    // Cron treats unescaped `%` in the command portion as a literal
+    // newline (man 5 crontab), which mangles any command containing
+    // strftime format strings, URL-encoded args, or printf %d.
+    // wrapCommand must escape so the on-disk crontab has \%.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const out = try wrapCommand(a, .{
+        .id = "tz-stamp",
+        .enabled = true,
+        .schedule = "0 9 * * *",
+        .command = "echo $(date +%H:%M:%S)",
+        .capture = true,
+        .wrapper_bin = "/usr/local/bin/looper",
+    });
+    try testing.expectEqualStrings(
+        "/usr/local/bin/looper _exec --source-id=tz-stamp -- /bin/sh -c 'echo $(date +\\%H:\\%M:\\%S)'",
+        out,
+    );
+}
+
+test "tryUnwrapInner reverses % escaping" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const wrapped = "/usr/local/bin/looper _exec --source-id=x -- /bin/sh -c 'echo $(date +\\%H:\\%M:\\%S)'";
+    const inner = tryUnwrapInner(a, wrapped).?;
+    try testing.expectEqualStrings("echo $(date +%H:%M:%S)", inner);
+}
+
+test "wrapCommand + tryUnwrapInner round-trip with % chars" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const originals = [_][]const u8{
+        "echo $(date +%H:%M:%S)",
+        "printf '%d items\\n' 42",
+        "echo 100%% done",
+        "wget 'https://example.com/path%20with%20spaces'",
+    };
+    for (originals) |inner| {
+        const wrapped = try wrapCommand(a, .{
+            .id = "pct",
+            .enabled = true,
+            .schedule = "@daily",
+            .command = inner,
+            .capture = true,
+            .wrapper_bin = "/usr/local/bin/looper",
+        });
+        const back = tryUnwrapInner(a, wrapped).?;
+        try testing.expectEqualStrings(inner, back);
+    }
 }
 
 test "wrapCommand fails when wrapper_bin is null" {
