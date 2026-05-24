@@ -25,6 +25,11 @@ cleanup() {
   # Clean per-target backups dir so reruns start fresh.
   local slug_dir="$HOME/.local/state/looper/backups/_tmp_looper-itest-$$.crontab"
   [ -d "$slug_dir" ] && rm -rf "$slug_dir" || true
+  # Clean run records created by the _exec phase.
+  for rid in "itest-$$-ok" "itest-$$-fail"; do
+    local rdir="$HOME/.local/state/looper/runs/$rid"
+    [ -d "$rdir" ] && rm -rf "$rdir" || true
+  done
 }
 trap cleanup EXIT
 
@@ -266,6 +271,125 @@ if command -v python3 >/dev/null 2>&1; then
 else
   echo "  (python3 not available, skipping JSON parse checks)"
 fi
+
+# ── PHASE 13 — add --capture wraps the cron payload, ls shows the inner ─────
+hr "PHASE 13: --capture wraps the payload, parser unwraps for display"
+
+"$BIN" --no-color -f "$F" add --capture --id capt "@daily" "/bin/echo cap-test" >/dev/null
+expect_contains "capture=1" "$(cat "$F")" "marker has capture=1"
+expect_contains "wrapper_bin=" "$(cat "$F")" "marker carries wrapper_bin"
+expect_contains "_exec --source-id=capt" "$(cat "$F")" "cron payload is the wrapper invocation"
+expect_contains " -- /bin/sh -c '/bin/echo cap-test'" "$(cat "$F")" "inner command is shell-quoted"
+
+out=$("$BIN" --no-color -f "$F" ls)
+expect_contains "/bin/echo cap-test" "$out" "ls shows the user's inner command, not the wrapper"
+expect_absent "_exec" "$out" "ls hides the wrapper line"
+
+# --capture is sticky: re-add without --capture preserves it.
+"$BIN" --no-color -f "$F" add --id capt "@hourly" "/bin/echo cap-test-2" >/dev/null
+expect_contains "capture=1" "$(cat "$F")" "re-add without --capture preserves capture=1"
+expect_contains "@hourly" "$(cat "$F")" "schedule updated despite re-add"
+
+# Clean up so the rest of the script doesn't see this job in ls.
+"$BIN" --no-color -f "$F" --yes rm capt >/dev/null
+
+# ── PHASE 14 — looper once: dry-run shape + target gating ────────────────────
+hr "PHASE 14: looper once — dry-run + local-only enforcement"
+
+# --dry-run avoids touching the real local crontab. Marker + wrapper visible.
+set +e
+out=$("$BIN" --no-color --dry-run once --id itest-once "in 5 min" "/bin/echo once-test" 2>&1)
+rc=$?
+set -e
+expect_status 0 "$rc" "once --dry-run succeeded"
+expect_contains "once=1" "$out" "dry-run shows once=1 in the marker"
+expect_contains "capture=1" "$out" "dry-run shows capture=1 in the marker"
+expect_contains "_exec --source-id=itest-once" "$out" "dry-run shows the wrapper invocation"
+expect_contains "--once" "$out" "wrapper invocation includes --once"
+
+# File / remote targets must be rejected before any write.
+set +e
+out=$("$BIN" --no-color -f "$F" once "in 5 min" "/bin/echo" 2>&1)
+rc=$?
+set -e
+expect_status 2 "$rc" "once with -f exits 2"
+expect_contains "local-target only" "$out" "rejection message mentions local-only"
+
+# Garbage time input is rejected with exit 1.
+set +e
+"$BIN" --no-color --dry-run once "not a time" "/bin/echo" 2>&1 >/dev/null
+rc=$?
+set -e
+expect_status 1 "$rc" "once with garbage time exits 1"
+
+# Past time is rejected with exit 1.
+set +e
+"$BIN" --no-color --dry-run once "2020-01-01T12:00:00Z" "/bin/echo" 2>&1 >/dev/null
+rc=$?
+set -e
+expect_status 1 "$rc" "once in the past exits 1"
+
+# ── PHASE 15 — _exec wrapper runs the child + records meta + captures output ─
+hr "PHASE 15: _exec captures output, records meta, exit code propagates"
+
+# 15a. Success path: exit 0, stdout captured.
+"$BIN" --no-color _exec --run-id "itest-$$-ok" --source-id "itest-fake" \
+  --target-label "local" -- /bin/sh -c "echo from-stdout; echo from-stderr >&2; exit 0"
+rec_dir="$HOME/.local/state/looper/runs/itest-$$-ok"
+[ -f "$rec_dir/meta" ] && pass "meta file written" || fail "meta file written"
+[ -f "$rec_dir/out" ] && pass "out file written" || fail "out file written"
+[ -f "$rec_dir/err" ] && pass "err file written" || fail "err file written"
+expect_contains "from-stdout" "$(cat "$rec_dir/out")" "stdout captured"
+expect_contains "from-stderr" "$(cat "$rec_dir/err")" "stderr captured"
+expect_contains "exit_code=0" "$(cat "$rec_dir/meta")" "meta shows exit_code=0"
+expect_contains "started_at=" "$(cat "$rec_dir/meta")" "meta has started_at"
+expect_contains "finished_at=" "$(cat "$rec_dir/meta")" "meta has finished_at"
+
+# 15b. Failure path: exit code propagates.
+set +e
+"$BIN" --no-color _exec --run-id "itest-$$-fail" --source-id "itest-fake" \
+  -- /bin/sh -c "exit 7"
+rc=$?
+set -e
+expect_status 7 "$rc" "child's exit code propagates through _exec"
+expect_contains "exit_code=7" "$(cat "$HOME/.local/state/looper/runs/itest-$$-fail/meta")" "meta records exit_code=7"
+
+# ── PHASE 16 — runs ls / show / prune ────────────────────────────────────────
+hr "PHASE 16: runs ls + show + prune"
+
+out=$("$BIN" --no-color runs ls)
+expect_contains "itest-$$-ok" "$out" "runs ls shows the success record"
+expect_contains "itest-$$-fail" "$out" "runs ls shows the failure record"
+expect_contains "done" "$out" "success record is classified as done"
+expect_contains "failed" "$out" "failure record is classified as failed"
+
+# Status filter narrows the listing.
+out=$("$BIN" --no-color runs ls --status done)
+expect_contains "itest-$$-ok" "$out" "status=done includes the success record"
+expect_absent "itest-$$-fail" "$out" "status=done excludes the failure record"
+
+# JSON output is a parseable array.
+if command -v python3 >/dev/null 2>&1; then
+  out=$("$BIN" runs ls --json)
+  if printf '%s' "$out" | python3 -c "import sys,json; json.load(sys.stdin)" >/dev/null 2>&1; then
+    pass "runs ls --json parses as JSON"
+  else fail "runs ls --json parses as JSON" "$out"
+  fi
+fi
+
+# Show: full record + captured output inline.
+out=$("$BIN" --no-color runs show "itest-$$-ok")
+expect_contains "from-stdout" "$out" "runs show emits captured stdout"
+expect_contains "exit" "$out" "runs show prints exit code line"
+
+# Prune the test records. --older-than 0 is rejected as a safety footgun
+# (the same way --keep 0 is for backups), so sleep briefly to give the
+# records age, then prune with a 1-second cutoff.
+sleep 2
+out=$("$BIN" --no-color --yes runs prune --older-than 1 2>&1)
+expect_contains "itest-$$-ok" "$out" "prune mentions removed records"
+[ -d "$HOME/.local/state/looper/runs/itest-$$-ok" ] && fail "ok run dir removed" || pass "ok run dir removed"
+[ -d "$HOME/.local/state/looper/runs/itest-$$-fail" ] && fail "fail run dir removed" || pass "fail run dir removed"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 hr "SUMMARY"
