@@ -62,6 +62,17 @@ pub const ParsedArgs = struct {
     /// from the local crontab. Without this, _exec just records the
     /// run (used by capture-enabled recurring jobs).
     once_flag: bool,
+    /// `runs ls --status <s>`: filter records by lifecycle status.
+    /// Raw string; commands/runs parses via parseStatusFilter.
+    status_filter: ?[]const u8,
+    /// `runs prune --older-than <secs>`: cutoff in seconds. v1 takes
+    /// an integer; a future revision could accept duration syntax
+    /// like "30d" or "1w".
+    older_than_secs: ?i64,
+    /// `runs show --full`: don't cap inline stdout/stderr at the
+    /// usual 8 KiB. For very large captures the user can also read
+    /// the files directly under state_dir/runs/<id>/.
+    full_output: bool,
     force_help: bool,
     /// Set to the offending arg when an unknown option (e.g. `--frob`)
     /// is encountered. Parsing stops at the first unknown option so
@@ -95,6 +106,9 @@ pub fn parseArgv(a: std.mem.Allocator, argv: []const []const u8, ctx: *ctx_mod.C
         .timeout_secs = null,
         .target_label = null,
         .once_flag = false,
+        .status_filter = null,
+        .older_than_secs = null,
+        .full_output = false,
         .force_help = false,
         .bad_option = null,
     };
@@ -229,6 +243,27 @@ pub fn parseArgv(a: std.mem.Allocator, argv: []const []const u8, ctx: *ctx_mod.C
         }
         if (std.mem.eql(u8, arg, "--once")) {
             p.once_flag = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--status")) {
+            i += 1;
+            if (i < argv.len) p.status_filter = argv[i];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--older-than")) {
+            i += 1;
+            if (i < argv.len) {
+                p.older_than_secs = std.fmt.parseInt(i64, argv[i], 10) catch {
+                    p.bad_option = argv[i];
+                    p.positionals = try positionals.toOwnedSlice(a);
+                    p.hosts = try hosts.toOwnedSlice(a);
+                    return p;
+                };
+            }
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--full")) {
+            p.full_output = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
@@ -615,6 +650,9 @@ test "buildTargets default = local" {
         .timeout_secs = null,
         .target_label = null,
         .once_flag = false,
+        .status_filter = null,
+        .older_than_secs = null,
+        .full_output = false,
         .force_help = false,
         .bad_option = null,
     };
@@ -644,6 +682,9 @@ test "buildTargets file path → one file target" {
         .timeout_secs = null,
         .target_label = null,
         .once_flag = false,
+        .status_filter = null,
+        .older_than_secs = null,
+        .full_output = false,
         .force_help = false,
         .bad_option = null,
     };
@@ -675,6 +716,9 @@ test "buildTargets -H hosts → one remote per host, sharing user" {
         .timeout_secs = null,
         .target_label = null,
         .once_flag = false,
+        .status_filter = null,
+        .older_than_secs = null,
+        .full_output = false,
         .force_help = false,
         .bad_option = null,
     };
@@ -706,6 +750,9 @@ test "buildTargets --all parses hosts file, ignores blank/comment lines" {
         .timeout_secs = null,
         .target_label = null,
         .once_flag = false,
+        .status_filter = null,
+        .older_than_secs = null,
+        .full_output = false,
         .force_help = false,
         .bad_option = null,
     };
@@ -745,6 +792,9 @@ test "buildTargets --all empty hosts file → empty list" {
         .timeout_secs = null,
         .target_label = null,
         .once_flag = false,
+        .status_filter = null,
+        .older_than_secs = null,
+        .full_output = false,
         .force_help = false,
         .bad_option = null,
     };
@@ -773,6 +823,9 @@ test "buildTargets --all + -u applies user to every remote" {
         .timeout_secs = null,
         .target_label = null,
         .once_flag = false,
+        .status_filter = null,
+        .older_than_secs = null,
+        .full_output = false,
         .force_help = false,
         .bad_option = null,
     };

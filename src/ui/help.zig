@@ -29,6 +29,9 @@ pub fn printHelp(ctx: *ctx_mod.Ctx) void {
     ctx.emit("  backups prune --keep N    Remove older snapshots, keep the newest N\n", .{});
     ctx.emit("  restore [file|--from S]   Roll back to the newest (or named) snapshot\n", .{});
     ctx.emit("  doctor                    Preflight: crontab/ssh, backup dir, hosts file, targets\n", .{});
+    ctx.emit("  once <when> <command>     One-shot: fires once then removes itself (local only)\n", .{});
+    ctx.emit("  runs ls | show <id>       Inspect captured runs (one-shots + --capture jobs)\n", .{});
+    ctx.emit("  runs prune --older-than   Remove run records older than the given seconds\n", .{});
     ctx.emit("  help, version\n", .{});
     ctx.emit("\n", .{});
     ctx.emit("{s}TARGET{s} {s}(default: your own local crontab){s}\n", .{ B, R, D, R });
@@ -45,6 +48,10 @@ pub fn printHelp(ctx: *ctx_mod.Ctx) void {
     ctx.emit("      --no-color            Disable color (also obeys NO_COLOR)\n", .{});
     ctx.emit("      --no-target-tz        Skip remote TZ probe; render everything as controller-local\n", .{});
     ctx.emit("      --check-command       (add) warn if the command's binary isn't found on the target\n", .{});
+    ctx.emit("      --capture             (add) wrap the cron payload to capture stdout/stderr + exit code\n", .{});
+    ctx.emit("      --status <s>          (runs ls) filter by pending|running|done|failed\n", .{});
+    ctx.emit("      --older-than <secs>   (runs prune) cutoff age in seconds (default 30 days)\n", .{});
+    ctx.emit("      --full                (runs show) emit full captured output, no inline cap\n", .{});
     ctx.emit("  -h, --help                Show this help\n", .{});
     ctx.emit("\n", .{});
     ctx.emit("{s}SCHEDULES{s} {s}- cron, a macro, or plain English, all stored as standard cron{s}\n", .{ B, R, D, R });
@@ -62,6 +69,9 @@ pub fn printHelp(ctx: *ctx_mod.Ctx) void {
     ctx.emit("  {s}  {s}# pipe to jq, prometheus_exporter, etc.{s}\n", .{ "looper show db-backup --json                  ", D, R });
     ctx.emit("  {s}  {s}# list snapshots, then roll back to one{s}\n", .{ "looper backups && looper restore --from 20260521", D, R });
     ctx.emit("  {s}  {s}# warn if the binary isn't on the target{s}\n", .{ "looper -H nas add --check-command @daily /opt/bin/rep", D, R });
+    ctx.emit("  {s}  {s}# schedule a one-shot (fires once, then self-cleans){s}\n", .{ "looper once \"in 5 min\" \"backup.sh\"             ", D, R });
+    ctx.emit("  {s}  {s}# capture every fire's output to runs/{s}\n", .{ "looper add --capture @daily backup.sh         ", D, R });
+    ctx.emit("  {s}  {s}# see what fired, when, with what exit code{s}\n", .{ "looper runs ls && looper runs show <run_id>   ", D, R });
     ctx.emit("\n", .{});
     ctx.emit("Every change is backed up first; there is deliberately no \"delete everything\".\n", .{});
 }

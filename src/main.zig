@@ -12,7 +12,7 @@ const colors = @import("ui/colors.zig");
 const target_mod = @import("crontab/target.zig");
 const tz_mod = @import("tz.zig");
 
-const Cmd = enum { ls, add, edit, rm, enable, disable, show, run, explain, import, backup, backups, restore, doctor, version, help, unknown };
+const Cmd = enum { ls, add, edit, rm, enable, disable, show, run, explain, import, backup, backups, restore, doctor, once, runs, exec, version, help, unknown };
 
 fn parseCmd(s: []const u8) Cmd {
     // Note: `set` aliases `edit` (the partial-update command), not `add`.
@@ -25,12 +25,19 @@ fn parseCmd(s: []const u8) Cmd {
     // them or, with the `prune` subcommand, removes older ones. The two
     // are distinct verbs by design — `backup` is the side-effect, and
     // `backups` is the inventory.
+    //
+    // `_exec` is the internal cron-invoked wrapper for one-shot and
+    // capture-enabled jobs. Underscore-prefixed and hidden from --help;
+    // not in the regular map so a user typing 'exec' doesn't accidentally
+    // discover it.
+    if (std.mem.eql(u8, s, "_exec")) return .exec;
     const map = .{
         .{ "ls", Cmd.ls },           .{ "list", Cmd.ls },         .{ "add", Cmd.add },         .{ "edit", Cmd.edit },
         .{ "set", Cmd.edit },        .{ "rm", Cmd.rm },           .{ "remove", Cmd.rm },       .{ "delete", Cmd.rm },
         .{ "enable", Cmd.enable },   .{ "disable", Cmd.disable }, .{ "show", Cmd.show },       .{ "run", Cmd.run },
         .{ "explain", Cmd.explain }, .{ "import", Cmd.import },   .{ "backup", Cmd.backup },   .{ "backups", Cmd.backups },
-        .{ "restore", Cmd.restore }, .{ "doctor", Cmd.doctor },   .{ "version", Cmd.version }, .{ "help", Cmd.help },
+        .{ "restore", Cmd.restore }, .{ "doctor", Cmd.doctor },   .{ "once", Cmd.once },       .{ "runs", Cmd.runs },
+        .{ "version", Cmd.version }, .{ "help", Cmd.help },
     };
     inline for (map) |e| if (std.mem.eql(u8, s, e[0])) return e[1];
     return .unknown;
@@ -121,6 +128,99 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // target read failures that the loop below treats as fatal-per-target.
     if (cmd == .doctor) {
         try cmds.cmdDoctor(&ctx, targets, hosts_cfg_path, resolved.use_all);
+        ctx.flush();
+        if (ctx.exit_code != 0) std.process.exit(ctx.exit_code);
+        return;
+    }
+
+    // `_exec` is cron-invoked: it doesn't read a crontab up-front; it
+    // runs the wrapped command, records the run, and (if --once)
+    // removes the source job. Local-target by definition since cron
+    // fires the local user's crontab. The positional argv after `--`
+    // is the user's command — passed through verbatim.
+    if (cmd == .exec) {
+        try cmds.cmdExec(
+            &ctx,
+            parsed.run_id orelse "",
+            parsed.source_id,
+            parsed.timeout_secs,
+            parsed.target_label,
+            parsed.once_flag,
+            rest,
+        );
+        ctx.flush();
+        if (ctx.exit_code != 0) std.process.exit(ctx.exit_code);
+        return;
+    }
+
+    // `once <when> <cmd>` schedules a one-shot job. Local-only in v1
+    // (Phase A scope decision). Reads the local crontab itself rather
+    // than going through the per-target loop, so the diagnostic for
+    // a missing/unreachable crontab is more useful here.
+    if (cmd == .once) {
+        if (rest.len < 2) {
+            posix.eprint("looper: once needs <when> <command>\n", .{});
+            posix.eprint("  example: looper once \"in 5 min\" \"echo hello\"\n", .{});
+            ctx.fail(2);
+            ctx.flush();
+            std.process.exit(ctx.exit_code);
+        }
+        // v1 punt: -f / -H / --all silently ignored would be confusing
+        // (the writes happen to local crontab no matter what). Reject
+        // explicitly so the user gets a clear "not yet supported" error.
+        if (resolved.file_path.len > 0 or resolved.hosts.len > 0 or resolved.use_all) {
+            posix.eprint("looper: once is local-target only in v1 (remote/file one-shots aren't yet supported)\n", .{});
+            ctx.fail(2);
+            ctx.flush();
+            std.process.exit(ctx.exit_code);
+        }
+        const t: target_mod.Target = .{ .kind = .local };
+        const content = target_mod.readCrontab(a, t) catch "";
+        try cmds.cmdScheduleOnce(&ctx, t, content, rest[0], rest[1], .{
+            .want_id = parsed.want_id,
+            .timeout_secs = parsed.timeout_secs,
+        });
+        ctx.flush();
+        if (ctx.exit_code != 0) std.process.exit(ctx.exit_code);
+        return;
+    }
+
+    // `runs ls | show <id> | prune` queries / manages the local run
+    // records under state_dir/runs/. No target iteration — state_dir
+    // is per-machine.
+    if (cmd == .runs) {
+        if (rest.len == 0) {
+            posix.eprint("looper: runs needs a subcommand (ls, show <id>, or prune)\n", .{});
+            ctx.fail(2);
+            ctx.flush();
+            std.process.exit(ctx.exit_code);
+        }
+        const sub = rest[0];
+        if (std.mem.eql(u8, sub, "ls") or std.mem.eql(u8, sub, "list")) {
+            // Read local crontab so cmdRunsLs can synthesize pending
+            // records for one-shots not yet fired. Empty on read failure
+            // → pending detection skipped, executed records still shown.
+            const local: target_mod.Target = .{ .kind = .local };
+            const content = target_mod.readCrontab(a, local) catch "";
+            var filter: cmds.RunsFilter = .{};
+            if (parsed.status_filter) |s| filter.status = cmds.parseRunsStatusFilter(s);
+            try cmds.cmdRunsLs(&ctx, content, filter);
+        } else if (std.mem.eql(u8, sub, "show")) {
+            if (rest.len < 2) {
+                posix.eprint("looper: runs show needs a run_id (try: looper runs ls)\n", .{});
+                ctx.fail(2);
+                ctx.flush();
+                std.process.exit(ctx.exit_code);
+            }
+            try cmds.cmdRunsShow(&ctx, rest[1], parsed.full_output);
+        } else if (std.mem.eql(u8, sub, "prune")) {
+            try cmds.cmdRunsPrune(&ctx, parsed.older_than_secs);
+        } else {
+            posix.eprint("looper: unknown runs subcommand '{s}' (try: looper runs ls, runs show <id>, runs prune)\n", .{sub});
+            ctx.fail(2);
+            ctx.flush();
+            std.process.exit(ctx.exit_code);
+        }
         ctx.flush();
         if (ctx.exit_code != 0) std.process.exit(ctx.exit_code);
         return;
