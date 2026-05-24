@@ -8,7 +8,7 @@ Issue tracker: <https://github.com/AnthemFlynn/looper/issues>
 A Zig 0.16 CLI for managing cron jobs — locally, for another user, over ssh
 to remote hosts, or against a plain crontab file. Static binary, libc-only,
 no third-party runtime dependencies. (Kairoz is vendored as source under
-`src/cron/kairoz/`; itself pure-Zig + libc.)
+[`vendor/kairoz/`](vendor/README.md); itself pure-Zig + libc.)
 
 Shipped capabilities:
 
