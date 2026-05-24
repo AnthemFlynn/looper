@@ -36,7 +36,7 @@ here maps to one of them:
 Requires Zig 0.16+ (only libc is needed; no other dependencies).
 
 ```sh
-git clone https://github.com/<you>/looper && cd looper
+git clone https://github.com/AnthemFlynn/looper && cd looper
 make install                    # → ~/.local/bin/looper
 looper --help
 ```
@@ -80,16 +80,22 @@ looper <command> [args] [options]
 Commands
   ls                       list jobs (managed + unmanaged) with next run times
   add <schedule> <cmd>     add or update a job (idempotent; --id to name it)
+  edit <id>                partial update: --schedule X and/or --command Y
   rm <id|fN>...            remove job(s) by id, or unmanaged ones by fN handle
   enable / disable <id...> toggle a job without deleting its definition
   show <id>                detail: meaning + next 5 run times
   run <id>                 run a job's command right now (streamed output)
   explain <schedule>       explain a cron expression + next runs (writes nothing)
+  once <when> <command>    schedule a one-shot; fires once then self-removes
   import                   adopt existing unmanaged jobs into looper
   backup                   snapshot the current crontab
   backups                  list snapshots (newest first; size + age)
   backups prune --keep N   remove older snapshots, keep the newest N
   restore [file|--from S]  roll back to the newest, a named file, or a stamp
+  doctor                   preflight: crontab/ssh, backup dir, hosts file, targets
+  runs ls                  list captured runs (one-shots + --capture jobs)
+  runs show <run_id>       inspect a single run: meta, stdout, stderr, exit code
+  runs prune --older-than  remove run records older than the given seconds
   version | help
 
 Target (default: your local crontab)
@@ -101,10 +107,15 @@ Target (default: your local crontab)
 Options
       --dry-run            show the diff that would be written; write nothing
   -y, --yes                assume yes (required for destructive ops without a tty)
-      --json               machine-readable output (ls, show, explain, dry-run)
+      --json               machine-readable output (ls, show, explain, runs, dry-run)
   -q, --quiet              only print errors
       --no-color           disable color (also honored: NO_COLOR)
+      --no-target-tz       skip remote TZ probe; render everything as controller-local
       --check-command      (add) warn if the command binary isn't on the target
+      --capture            (add) wrap the cron payload to capture stdout/stderr + exit code
+      --status <s>         (runs ls) filter by pending|running|done|failed
+      --older-than <secs>  (runs prune) cutoff age in seconds (default 30 days)
+      --full               (runs show) emit full captured output, no inline cap
 ```
 
 ### Examples
@@ -138,6 +149,15 @@ looper -H pi@nas -H pi@media add --id reboot-clean "@reboot" "/opt/clean.sh"
 # failures the user only finds out about from the mail spool the next day.
 looper -H pi@nas add --check-command --id rep "@daily" "/opt/bin/report.sh"
 # → ! command '/opt/bin/report.sh' not found on pi@nas — cron may fail to run
+
+# Schedule a one-shot — fires once at the given moment, then self-cleans
+looper once "in 5 min" "backup.sh"
+looper once "tomorrow at 8am" "/opt/bin/report.sh"
+
+# Capture every fire's stdout/stderr/exit code into the runs store
+looper add --capture @daily "/opt/bin/report.sh"
+looper runs ls                                    # what fired, when, status
+looper runs show <run_id>                         # full meta + output
 ```
 
 ## Natural-language schedules
@@ -241,6 +261,58 @@ to preview the exact list of stamps that would be removed.
 unambiguous substring (`20260521`). If a substring matches more than one
 snapshot, looper refuses rather than silently picking one — run `looper
 backups` and narrow the input.
+
+## One-shots and captured runs
+
+Two features let you reach for looper for work that isn't strictly "a recurring
+cron line": deferred one-shots, and durable record-keeping of any job's output.
+
+### `looper once <when> <command>`
+
+Schedule a single firing at the moment you describe — in cron, in English (via
+Kairoz), or absolute. Looper writes a normal cron line under the hood and
+arranges for the job to self-remove from the crontab after it fires:
+
+```sh
+looper once "in 5 min" "/opt/bin/backup.sh"
+looper once "tomorrow at 8am" "report.sh"
+looper once "2026-06-01 09:00" "rollover.sh"
+```
+
+The job runs through the same `_exec` wrapper that `--capture` uses, so stdout,
+stderr, exit code, and timing are all captured to the runs store automatically.
+v1 is local-target only; remote one-shots add per-target wrapper resolution
+issues that are tracked separately.
+
+### `looper add --capture <schedule> <command>`
+
+Wraps a recurring job's cron payload with the internal `_exec` subcommand
+before writing it. Every fire from then on records a `RunRecord` under
+`${XDG_STATE_HOME:-~/.local/state}/looper/runs/<run_id>/`:
+
+```
+meta — newline key=value lines: source_id, started_at, finished_at, exit_code, timed_out
+out  — the run's captured stdout
+err  — the run's captured stderr
+```
+
+`edit --capture` and `edit --no-capture` flip the bit on an existing job
+without reflowing the cron line.
+
+### `looper runs ls / show / prune`
+
+```sh
+looper runs ls                              # newest first: id, status, age, command
+looper runs ls --status failed              # filter by lifecycle state
+looper runs show <run_id>                   # meta + first 8KB of out/err inline
+looper runs show <run_id> --full            # uncapped — pipe to less or a file
+looper runs prune --older-than 2592000      # remove records older than 30 days
+```
+
+The runs store is per-machine local state — there's no `-H host` concept on
+the `runs` family. The runs CLI also synthesizes a "pending" entry for any
+one-shot whose crontab marker exists but hasn't fired yet, so you can see
+what's queued alongside what already ran.
 
 ## `--all` host list
 
@@ -387,6 +459,26 @@ are all covered by inline unit tests colocated with each module. Run them with:
 make test                # zig build test
 make itest               # end-to-end script against /tmp/looper-itest-$$
 ```
+
+## Status & roadmap
+
+Looper is in active development. The shipped surface above is stable and
+covers the human-CLI use case — managing cron on one box or a fleet, with
+deferred one-shots and durable output capture layered on top.
+
+The next arc reframes looper as a **primitive that agent automations reach
+for** when they need to install, observe, and own recurring or one-shot
+jobs across one host or many. The agent loop closes when an agent can
+install a job, talk to looper in stable JSON, distinguish its own work
+from other agents', and read whether its job ran.
+
+See [ROADMAP.md](ROADMAP.md) for the v0.1–v0.4 milestone breakdown.
+Live status: [GitHub milestones](https://github.com/AnthemFlynn/looper/milestones).
+
+This direction does not widen looper's scope. Looper stays a cron
+management tool — never a scheduler, never a daemon, never a workflow
+engine. Dependency graphs, retry policies, alerting transports, and
+persistent supervision are explicitly out of scope.
 
 ## License
 

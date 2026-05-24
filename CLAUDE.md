@@ -6,6 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `looper` is a Zig 0.16 CLI that manages cron jobs — locally, for another user, on remote hosts over `ssh`, or in a plain crontab file. The source lives under `src/`, libc-only, no third-party dependencies. Built with `build.zig` (`zig build`); cross-targets are passed via `-Dtarget=...`.
 
+## Direction
+
+Active product direction: looper as an automation primitive for agents, not just a human CLI. Concretely: JSON-first output, provenance per job (`created_by`, `last_modified_by`), wrap-by-default execution (promoting the existing `--capture` to the default), end-to-end verification, and declarative apply. See [ROADMAP.md](ROADMAP.md) for the v0.1–v0.4 milestone breakdown and the GitHub issues linked from each section.
+
+This direction does **not** widen looper's scope. The codebase stays a cron management tool — never a scheduler, never a daemon, never a workflow engine. The added surface (provenance, wrap defaults, verify, apply) makes the same managed-cron job safer and more programmable; it does not introduce job dependency graphs, persistent supervision, or alerting transports.
+
+When implementing features from the roadmap, prefer extending the existing primitives (the `#looper#` marker schema, the `_exec` wrapper, the `applyMutation` funnel, the runs store) rather than adding parallel mechanisms. The agent-primitive features should feel like the natural next layer on top of the human-CLI foundation, not a separate product bolted on.
+
 ## Build & run
 
 ```sh
