@@ -84,6 +84,22 @@ has no way to install, own, observe, or coordinate.
   <id>` / `last` / `tail`. Reads wrap run logs first, falls back to
   syslog / journalctl. The agent's read side of the feedback loop.
 
+**v0.1 success criterion.** An agent can install a recurring task, find out
+when it ran, and read what it produced — all via `looper` CLI calls returning
+stable JSON. Concretely:
+
+```sh
+looper add --as agent-a --capture "@hourly" "my-script.sh"
+# ... time passes ...
+looper runs ls --owner agent-a --json | jq '.[0]'
+# { "run_id": "...", "source_id": "...", "exit_code": 0, "duration_ms": 1234, ... }
+looper runs show <run_id> --json | jq '.captured.stdout'
+# "..."
+```
+
+If this flow works end-to-end with stable schemas, provenance filtering, and
+wrap-by-default capture — v0.1 is done.
+
 ### v0.2 deployable
 
 Multi-host and multi-agent safety. Once agents can install and observe
@@ -120,6 +136,95 @@ directly, with typed inputs and outputs, instead of shell + JSON parsing.
 - [#9](https://github.com/AnthemFlynn/looper/issues/9) — design
   discussion before implementation. Several questions need answers first
   (transport, auth model, dep policy, in-tree vs. separate binary).
+
+### v0.5 agent power tools
+
+Tightens the agent loop beyond v0.1's basics. With these shipped, agents
+can push-subscribe to events, detect missed fires, stream live output,
+query history structurally, and replay past invocations.
+
+- [#11](https://github.com/AnthemFlynn/looper/issues/11) — `looper subscribe`
+  — push event stream of run lifecycle.
+- [#12](https://github.com/AnthemFlynn/looper/issues/12) — `looper missed`
+  — local heartbeat / missed-fire detection (the Healthchecks.io equivalent,
+  no SaaS).
+- [#13](https://github.com/AnthemFlynn/looper/issues/13) — `runs show --follow`
+  — stream captured output as a long-running job writes it.
+- [#14](https://github.com/AnthemFlynn/looper/issues/14) — `looper runs query`
+  — structured filter expression over run records.
+- [#15](https://github.com/AnthemFlynn/looper/issues/15) — `looper replay
+  <run_id>` — re-execute a past invocation with full wrap, linked to original.
+
+### v0.6 ops integration
+
+Makes looper deployable into real ops stacks. Metrics flow into Prometheus
+via the daemon-free textfile-collector pattern, extensibility lives in
+hooks, compliance gets append-only audit log, reliability covers downtime
+via catchup semantics, multi-tenancy stays safe via per-owner quotas.
+
+- [#16](https://github.com/AnthemFlynn/looper/issues/16) — `looper metrics`
+  — Prometheus textfile-collector emission (no HTTP server, stays
+  daemon-free).
+- [#17](https://github.com/AnthemFlynn/looper/issues/17) — hooks —
+  user-provided scripts invoked at lifecycle points. The escape valve for
+  every integration that would otherwise require outbound networking
+  (Slack, PagerDuty, SIEM).
+- [#18](https://github.com/AnthemFlynn/looper/issues/18) — append-only audit
+  log of every mutation. Compliance-grade action history, separate from
+  state snapshots in backups.
+- [#19](https://github.com/AnthemFlynn/looper/issues/19) — catchup semantics
+  — detect and (optionally) replay missed fires after downtime. Closes the
+  gap vs systemd timers' `Persistent=true`.
+- [#20](https://github.com/AnthemFlynn/looper/issues/20) — per-owner quotas.
+  Caps on jobs and run rate per principal; prevents runaway agent loops
+  from monopolizing shared infrastructure.
+
+### v0.7 ergonomics
+
+The "feels modern" layer for humans. v0.5 and v0.6 serve agents and ops;
+v0.7 serves the humans who maintain looper-managed systems day to day.
+
+- [#21](https://github.com/AnthemFlynn/looper/issues/21) — `looper edit -e`
+  — open the full crontab in `$EDITOR`, validate on save. The safer
+  `crontab -e`.
+- [#22](https://github.com/AnthemFlynn/looper/issues/22) — `looper tui` —
+  full-screen terminal UI for navigation, drill-in, edit.
+- [#23](https://github.com/AnthemFlynn/looper/issues/23) — shell completions
+  (bash / zsh / fish) and a real man page.
+- [#24](https://github.com/AnthemFlynn/looper/issues/24) — `looper export
+  --format spec` — bidirectional with `apply`. The migration path from
+  imperative to declarative.
+- [#25](https://github.com/AnthemFlynn/looper/issues/25) — iCal export.
+  Subscribe to looper's schedule from Apple Calendar / Google Calendar.
+
+## Decisions deferred
+
+### Multi-backend support (systemd timers, launchd, Task Scheduler)
+
+Considered: extending looper to translate managed jobs onto native schedulers
+on platforms where they're preferred — systemd timers on Linux distros that
+use systemd, launchd on macOS, Task Scheduler on Windows. A `Target.kind`
+extension translating the marker-line metadata and execution wrapper to each
+backend's native format.
+
+**Status: deferred until concrete pain emerges.** Today cron works on every
+Linux fleet we target, and `_exec` already provides the unified execution
+layer across platforms (capture, lock, timeout, structured logging). The
+features native schedulers offer that cron can't — sub-second triggering,
+event triggers, `Persistent=true` catch-up — aren't blocking the
+agent-primitive thesis. When a real use case surfaces that genuinely cannot
+be served by cron + `_exec`, this re-opens.
+
+**Specifically rejected: shipping looper's own scheduling daemon.** The
+operational cost of running and maintaining a daemon (boot lifecycle, signal
+handling, version skew, distribution friction) is the very thing looper's
+wedge avoids by riding existing infrastructure. History has not been kind
+to cron alternatives (fcron, dcron, jobber, gocron, dkron, …) — every one
+of them was technically respectable; none displaced cron. The reason is
+operational, not technical: installing a new scheduler means changing your
+deployment, audit, and monitoring story. "Compatible with what's already
+there" beats "better but different" basically every time. We don't intend
+to enter that graveyard.
 
 ## Explicitly out of scope
 
