@@ -128,16 +128,7 @@ drift detection, end-to-end verification.
   <id>`. Outside-in smoke test: schedule resolves, daemon active, wrapper
   resolvable, command resolvable.
 
-### v0.4 mcp (RFC)
-
-Native MCP server surface so agents can call looper via tool-use protocol
-directly, with typed inputs and outputs, instead of shell + JSON parsing.
-
-- [#9](https://github.com/AnthemFlynn/looper/issues/9) — design
-  discussion before implementation. Several questions need answers first
-  (transport, auth model, dep policy, in-tree vs. separate binary).
-
-### v0.5 agent power tools
+### v0.4 agent power tools
 
 Tightens the agent loop beyond v0.1's basics. With these shipped, agents
 can push-subscribe to events, detect missed fires, stream live output,
@@ -155,7 +146,7 @@ query history structurally, and replay past invocations.
 - [#15](https://github.com/AnthemFlynn/looper/issues/15) — `looper replay
   <run_id>` — re-execute a past invocation with full wrap, linked to original.
 
-### v0.6 ops integration
+### v0.5 ops integration
 
 Makes looper deployable into real ops stacks. Metrics flow into Prometheus
 via the daemon-free textfile-collector pattern, extensibility lives in
@@ -179,10 +170,10 @@ via catchup semantics, multi-tenancy stays safe via per-owner quotas.
   Caps on jobs and run rate per principal; prevents runaway agent loops
   from monopolizing shared infrastructure.
 
-### v0.7 ergonomics
+### v0.6 ergonomics
 
-The "feels modern" layer for humans. v0.5 and v0.6 serve agents and ops;
-v0.7 serves the humans who maintain looper-managed systems day to day.
+The "feels modern" layer for humans. v0.4 and v0.5 serve agents and ops;
+v0.6 serves the humans who maintain looper-managed systems day to day.
 
 - [#21](https://github.com/AnthemFlynn/looper/issues/21) — `looper edit -e`
   — open the full crontab in `$EDITOR`, validate on save. The safer
@@ -196,6 +187,22 @@ v0.7 serves the humans who maintain looper-managed systems day to day.
   imperative to declarative.
 - [#25](https://github.com/AnthemFlynn/looper/issues/25) — iCal export.
   Subscribe to looper's schedule from Apple Calendar / Google Calendar.
+
+### v0.7 mcp (RFC)
+
+Native MCP server surface so agents can call looper via tool-use protocol
+directly, with typed inputs and outputs, instead of shell + JSON parsing.
+
+Deliberately sequenced last: MCP is an *interface* over what the CLI does,
+not a new capability. Designing it before the CLI surface stabilizes means
+perpetual churn — ship MCP at v0.3 and you'd be retrofitting tools to it
+every milestone as `subscribe`, `missed`, `query`, `replay`, `metrics`,
+`hooks`, `audit`, `catchup`, `quotas`, `export` each landed. Waiting until
+v0.6 lets MCP expose the stable thing once.
+
+- [#9](https://github.com/AnthemFlynn/looper/issues/9) — design
+  discussion before implementation. Several questions need answers first
+  (transport, auth model, dep policy, in-tree vs. separate binary).
 
 ## Decisions deferred
 

@@ -472,7 +472,7 @@ jobs across one host or many. The agent loop closes when an agent can
 install a job, talk to looper in stable JSON, distinguish its own work
 from other agents', and read whether its job ran.
 
-See [ROADMAP.md](ROADMAP.md) for the v0.1–v0.4 milestone breakdown.
+See [ROADMAP.md](ROADMAP.md) for the v0.1–v0.7 milestone breakdown.
 Live status: [GitHub milestones](https://github.com/AnthemFlynn/looper/milestones).
 
 This direction does not widen looper's scope. Looper stays a cron
