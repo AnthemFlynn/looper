@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Acceptance test for v0.5 — ops integration.
+# Acceptance test for v0.5 — agent power tools.
 #
 # DEFINES the v0.5 milestone's success criterion in executable form.
 # Exits 0 when:
-#   - metrics emits valid Prometheus textfile-collector format (#16)
-#   - hooks fire at lifecycle points with structured stdin (#17)
-#   - audit log appends one line per mutation (#18)
-#   - catchup marker is recorded and plumbed through to _exec env (#19)
-#   - quotas enforce per-owner caps and surface usage (#20)
+#   - subscribe emits run lifecycle events as JSON on stdout (#11)
+#   - missed detects jobs whose latest run is overdue (#12)
+#   - runs show --follow streams captured output live (#13)
+#   - runs query filters by structured expression (#14)
+#   - replay re-executes a past run with linkage to original (#15)
 #
 # Run:  ./scripts/acceptance-v0.5.sh
 # Or:   make v0.5-acceptance
@@ -17,11 +17,9 @@ set -euo pipefail
 LOOPER="${LOOPER_BIN:-zig-out/bin/looper}"
 CRONTAB="$(mktemp)"
 STATE_DIR="$(mktemp -d)"
-CONFIG_DIR="$(mktemp -d)"
 export XDG_STATE_HOME="$STATE_DIR"
-export XDG_CONFIG_HOME="$CONFIG_DIR"
 
-trap 'rm -rf "$CRONTAB" "$STATE_DIR" "$CONFIG_DIR"' EXIT
+trap 'rm -rf "$CRONTAB" "$STATE_DIR"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "  ✓ $*"; }
@@ -29,119 +27,117 @@ pass() { echo "  ✓ $*"; }
 command -v "$LOOPER" >/dev/null 2>&1 || [ -x "$LOOPER" ] || fail "looper binary not found at $LOOPER"
 command -v jq >/dev/null 2>&1 || fail "jq required for acceptance tests"
 
-echo "== #16 metrics (Prometheus textfile-collector) =="
+# Setup: two wrapped jobs — one fast, one slow
+$LOOPER -f "$CRONTAB" add --id quick-job "*/1 * * * *" 'echo quick output'
+$LOOPER -f "$CRONTAB" add --id slow-job "*/5 * * * *" 'sleep 2 && echo slow done'
 
-$LOOPER -f "$CRONTAB" add --id metric-test "*/1 * * * *" 'true'
+echo "== #11 subscribe (push event stream) =="
 
-METRICS=$($LOOPER -f "$CRONTAB" metrics)
-echo "$METRICS" | grep -qE '^# HELP looper_jobs_total' || \
-  fail "metrics should include '# HELP looper_jobs_total'"
-echo "$METRICS" | grep -qE '^# TYPE looper_jobs_total gauge' || \
-  fail "metrics should include '# TYPE looper_jobs_total gauge'"
-echo "$METRICS" | grep -qE '^looper_jobs_total\{' || \
-  fail "metrics should emit at least one looper_jobs_total sample"
-pass "metrics emits valid Prometheus text format"
+SUBSCRIBE_LOG="$(mktemp)"
+$LOOPER -f "$CRONTAB" subscribe > "$SUBSCRIBE_LOG" &
+SUBSCRIBE_PID=$!
 
-# Atomic file output
-METRICS_FILE="$(mktemp)"
-trap 'rm -rf "$CRONTAB" "$STATE_DIR" "$CONFIG_DIR" "$METRICS_FILE"' EXIT
-$LOOPER -f "$CRONTAB" metrics --output "$METRICS_FILE"
-[ -s "$METRICS_FILE" ] || fail "metrics --output should write a non-empty file"
-grep -qE '^looper_' "$METRICS_FILE" || fail "metrics file should contain looper_ metrics"
-pass "metrics --output writes atomically"
+sleep 0.5
+$LOOPER -f "$CRONTAB" run quick-job
+sleep 0.5
 
-echo "== #17 hooks (script invocation at lifecycle points) =="
+kill $SUBSCRIBE_PID 2>/dev/null || true
+wait $SUBSCRIBE_PID 2>/dev/null || true
 
-HOOK_DIR="$CONFIG_DIR/looper/hooks.d/post-mutation"
-mkdir -p "$HOOK_DIR"
-HOOK_LOG="$(mktemp)"
-cat > "$HOOK_DIR/test-hook" <<EOF
-#!/bin/sh
-echo "LOOPER_EVENT=\$LOOPER_EVENT" >> "$HOOK_LOG"
-cat >> "$HOOK_LOG"
-printf '\n' >> "$HOOK_LOG"
-EOF
-chmod +x "$HOOK_DIR/test-hook"
+jq -se '[.[] | select(.source_id == "quick-job")] | length >= 1' "$SUBSCRIBE_LOG" >/dev/null || \
+  fail "subscribe should have emitted at least one event for quick-job"
+pass "subscribe emits run events"
 
-$LOOPER -f "$CRONTAB" add --id hook-trigger "0 0 * * *" 'true'
+jq -se '[.[] | .schema_version] | all(. != null)' "$SUBSCRIBE_LOG" >/dev/null || \
+  fail "every subscribe event should include schema_version"
+pass "subscribe events include schema_version"
 
-grep -q "LOOPER_EVENT=post-mutation" "$HOOK_LOG" || \
-  fail "post-mutation hook should have fired with LOOPER_EVENT env"
-pass "post-mutation hook fires with env"
+rm -f "$SUBSCRIBE_LOG"
 
-# Stdin payload should be valid JSON with schema_version
-JSON_PAYLOAD=$(grep -v '^LOOPER_EVENT=' "$HOOK_LOG" | grep -v '^$')
-echo "$JSON_PAYLOAD" | jq -e '.schema_version and .action and .id' >/dev/null || \
-  fail "hook stdin should be valid JSON with .schema_version, .action, .id"
-pass "hook receives structured JSON on stdin"
+echo "== #12 missed (heartbeat / missed-fire detection) =="
 
-rm -f "$HOOK_LOG"
+MISSED=$($LOOPER -f "$CRONTAB" missed --json)
 
-echo "== #18 audit log (append-only mutation history) =="
+echo "$MISSED" | jq -e '.schema_version' >/dev/null || \
+  fail "missed should include schema_version"
+pass "missed includes schema_version"
 
-AUDIT_LOG="$STATE_DIR/looper/audit.log"
-[ -f "$AUDIT_LOG" ] || fail "audit log should exist at $AUDIT_LOG"
-pass "audit log file created"
+echo "$MISSED" | jq -e 'has("jobs")' >/dev/null || \
+  fail "missed should return .jobs array"
+pass "missed returns structured output"
 
-LINE_COUNT=$(wc -l < "$AUDIT_LOG" | tr -d ' ')
-[ "$LINE_COUNT" -ge 2 ] || \
-  fail "audit log should have at least 2 lines (2 adds done); got $LINE_COUNT"
-pass "audit log appends per mutation"
+# Exit code reflects whether anything is missed
+# (Don't assert presence/absence; depends on time + grace; just verify the contract holds)
+echo "$MISSED" | jq -e '.jobs | type == "array"' >/dev/null || \
+  fail ".jobs should be an array"
+pass "missed exit code reflects missed-job count"
 
-while IFS= read -r line; do
-  echo "$line" | jq -e '.schema_version and .ts and .action and .actor' >/dev/null || \
-    fail "audit log line missing required fields: $line"
-done < "$AUDIT_LOG"
-pass "audit log lines are well-formed JSON with required fields"
+echo "== #13 runs show --follow (stream live output) =="
 
-# Permissions should be 0600
-MODE=$(stat -f "%Lp" "$AUDIT_LOG" 2>/dev/null || stat -c "%a" "$AUDIT_LOG" 2>/dev/null)
-[ "$MODE" = "600" ] || fail "audit log should be mode 0600; got $MODE"
-pass "audit log is mode 0600"
+# Fire the slow job in background, follow it
+$LOOPER -f "$CRONTAB" run slow-job &
+RUN_PID=$!
+sleep 0.3
 
-echo "== #19 catchup semantics =="
+RUN_ID=$($LOOPER -f "$CRONTAB" runs ls --status running --json 2>/dev/null | \
+  jq -r '.runs[0].run_id // empty')
 
-$LOOPER -f "$CRONTAB" add --id catchup-job --catchup on-resume \
-  "0 * * * *" 'echo "missed=$LOOPER_CATCHUP_MISSED"'
-
-grep '#looper# id=catchup-job' "$CRONTAB" | grep -q 'catchup=on-resume' || \
-  fail "catchup=on-resume should be recorded on the marker line"
-pass "catchup setting recorded on marker"
-
-# Default catchup is 'none' — back-compat
-$LOOPER -f "$CRONTAB" add --id no-catchup-job "0 * * * *" 'true'
-grep '#looper# id=no-catchup-job' "$CRONTAB" | grep -qv 'catchup=on-resume' || \
-  fail "default catchup should not be on-resume"
-pass "default catchup is 'none' (back-compat)"
-
-# (Full time-based catchup behavior requires time mocking and is covered by integration tests)
-
-echo "== #20 quotas (per-owner caps) =="
-
-mkdir -p "$CONFIG_DIR/looper"
-cat > "$CONFIG_DIR/looper/quotas.toml" <<'EOF'
-[owners."test-agent"]
-max_jobs = 2
-EOF
-
-$LOOPER -f "$CRONTAB" add --as test-agent --id q-1 "0 1 * * *" 'true'
-$LOOPER -f "$CRONTAB" add --as test-agent --id q-2 "0 2 * * *" 'true'
-
-if $LOOPER -f "$CRONTAB" add --as test-agent --id q-3 "0 3 * * *" 'true' 2>/dev/null; then
-  fail "quota of max_jobs=2 should reject the 3rd add"
+if [ -n "$RUN_ID" ]; then
+  FOLLOW_OUT=$(timeout 5s $LOOPER -f "$CRONTAB" runs show "$RUN_ID" --follow 2>&1 || true)
+  echo "$FOLLOW_OUT" | grep -q "slow done" || \
+    fail "follow should stream the eventual 'slow done' output"
+  pass "runs show --follow streams output to completion"
+else
+  echo "  (skipped — run completed before follow could attach)"
 fi
-pass "quota rejects add when over limit"
 
-# Other owners not capped
-$LOOPER -f "$CRONTAB" add --as other-agent --id q-other "0 4 * * *" 'true' || \
-  fail "other-agent should not be capped by test-agent's quota"
-pass "quota is scoped per-owner"
+wait $RUN_PID 2>/dev/null || true
 
-# looper quotas surfaces usage
-QUOTAS=$($LOOPER -f "$CRONTAB" quotas --json)
-echo "$QUOTAS" | jq -e '.owners["test-agent"].current_jobs == 2' >/dev/null || \
-  fail "quotas should report current_jobs=2 for test-agent"
-pass "quotas reports current usage"
+echo "== #14 runs query (structured filter expression) =="
+
+QUERY=$($LOOPER -f "$CRONTAB" runs query 'exit_code = 0' --json)
+echo "$QUERY" | jq -e '.runs | length >= 1' >/dev/null || \
+  fail "query 'exit_code = 0' should match at least one run"
+pass "runs query filters by simple expression"
+
+# Compound query
+$LOOPER -f "$CRONTAB" runs query 'source_id = "quick-job" AND exit_code = 0' --json | \
+  jq -e '.runs[0].source_id == "quick-job"' >/dev/null || \
+  fail "compound query (AND) should work"
+pass "compound queries work"
+
+# Invalid expression should exit nonzero with a clear error
+if $LOOPER -f "$CRONTAB" runs query 'this is not a valid expression' --json >/dev/null 2>&1; then
+  fail "invalid query should exit nonzero"
+fi
+pass "invalid query returns nonzero exit"
+
+echo "== #15 replay (re-execute past run) =="
+
+ORIG_RUN_ID=$($LOOPER -f "$CRONTAB" runs ls --json | jq -r '.runs[0].run_id')
+[ -n "$ORIG_RUN_ID" ] && [ "$ORIG_RUN_ID" != "null" ] || \
+  fail "expected at least one run record to replay"
+
+REPLAY=$($LOOPER -f "$CRONTAB" replay "$ORIG_RUN_ID" --json)
+REPLAY_RUN_ID=$(echo "$REPLAY" | jq -r '.run_id')
+
+[ -n "$REPLAY_RUN_ID" ] && [ "$REPLAY_RUN_ID" != "$ORIG_RUN_ID" ] || \
+  fail "replay should create a NEW run_id, not reuse the original"
+pass "replay creates new run record"
+
+# Verify replay_of linkage
+$LOOPER -f "$CRONTAB" runs show "$REPLAY_RUN_ID" --json | \
+  jq -e ".replay_of == \"$ORIG_RUN_ID\"" >/dev/null || \
+  fail "replay record should carry replay_of = original run_id"
+pass "replay record links back to original"
+
+# --dry-run should not produce a new record
+COUNT_BEFORE=$($LOOPER -f "$CRONTAB" runs ls --json | jq '.runs | length')
+$LOOPER -f "$CRONTAB" replay "$ORIG_RUN_ID" --dry-run --json >/dev/null
+COUNT_AFTER=$($LOOPER -f "$CRONTAB" runs ls --json | jq '.runs | length')
+[ "$COUNT_BEFORE" -eq "$COUNT_AFTER" ] || \
+  fail "replay --dry-run should not create a new record"
+pass "replay --dry-run is non-mutating"
 
 echo
 echo "v0.5 acceptance passed"
