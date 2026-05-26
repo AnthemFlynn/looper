@@ -24,6 +24,8 @@ const preflight = @import("commands/preflight.zig");
 const runs = @import("commands/runs.zig");
 const exec = @import("commands/exec.zig");
 const once = @import("commands/once.zig");
+const history = @import("commands/history.zig");
+const apply_cmd = @import("commands/apply.zig");
 
 // core
 pub const applyMutation = core.applyMutation;
@@ -34,12 +36,14 @@ pub const cmdAdd = mutate.cmdAdd;
 pub const cmdToggle = mutate.cmdToggle;
 pub const cmdEdit = mutate.cmdEdit;
 pub const cmdRm = mutate.cmdRm;
+pub const EditOpts = mutate.EditOpts;
 
 // view
 pub const cmdLs = view.cmdLs;
 pub const cmdShow = view.cmdShow;
 pub const cmdRun = view.cmdRun;
 pub const cmdExplain = view.cmdExplain;
+pub const LsOpts = view.LsOpts;
 
 // backup
 pub const cmdBackup = backup_cmd.cmdBackup;
@@ -68,10 +72,20 @@ pub const parseRunsStatusFilter = runs.parseStatusFilter;
 
 // exec
 pub const cmdExec = exec.cmdExec;
+pub const cmdExecWithOwner = exec.cmdExecWithOwner;
 
 // once
 pub const cmdScheduleOnce = once.cmdScheduleOnce;
 pub const OnceOpts = once.OnceOpts;
+
+// history
+pub const cmdHistory = history.cmdHistory;
+pub const cmdLast = history.cmdLast;
+
+// apply / plan (v0.2 #2)
+pub const cmdApply = apply_cmd.cmdApply;
+pub const cmdPlan = apply_cmd.cmdPlan;
+pub const ApplyOpts = apply_cmd.ApplyOpts;
 
 // Ensure the test harness compiles every submodule. `main.zig`'s
 // test {} block imports this file, so anything referenced here gets
@@ -86,4 +100,6 @@ test {
     _ = runs;
     _ = exec;
     _ = once;
+    _ = history;
+    _ = apply_cmd;
 }

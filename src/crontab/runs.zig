@@ -50,6 +50,11 @@ pub const RunRecord = struct {
     exit_code: ?i32 = null,
     /// True if `_exec` killed the child for exceeding timeout_secs.
     timed_out: bool = false,
+    /// Provenance copied from the source job at run time. Null when the
+    /// job had no `created_by` (legacy job or hand-edit) or when the
+    /// record was written by a path that didn't have the source job in
+    /// hand. `runs ls --owner` filters on this.
+    created_by: ?[]const u8 = null,
 };
 
 /// Lifecycle classification derived from which fields are set.
@@ -128,6 +133,7 @@ pub fn metaSerialize(a: std.mem.Allocator, r: RunRecord) ![]u8 {
     if (r.finished_at) |t| appendInt(a, &out, "finished_at", t);
     if (r.exit_code) |code| appendInt(a, &out, "exit_code", @as(i64, code));
     appendBool(a, &out, "timed_out", r.timed_out);
+    if (r.created_by) |cb| appendStr(a, &out, "created_by", cb);
     return out.toOwnedSlice(a);
 }
 
@@ -165,6 +171,7 @@ pub fn metaParse(a: std.mem.Allocator, text: []const u8) !RunRecord {
     var finished_at: ?i64 = null;
     var exit_code: ?i32 = null;
     var timed_out = false;
+    var created_by: ?[]const u8 = null;
 
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
@@ -181,7 +188,8 @@ pub fn metaParse(a: std.mem.Allocator, text: []const u8) !RunRecord {
         else if (std.mem.eql(u8, k, "started_at")) started_at = std.fmt.parseInt(i64, v, 10) catch null
         else if (std.mem.eql(u8, k, "finished_at")) finished_at = std.fmt.parseInt(i64, v, 10) catch null
         else if (std.mem.eql(u8, k, "exit_code")) exit_code = std.fmt.parseInt(i32, v, 10) catch null
-        else if (std.mem.eql(u8, k, "timed_out")) timed_out = parseBool(v);
+        else if (std.mem.eql(u8, k, "timed_out")) timed_out = parseBool(v)
+        else if (std.mem.eql(u8, k, "created_by")) created_by = try a.dupe(u8, v);
         // unknown keys: silently ignored (forward-compat)
     }
 
@@ -196,6 +204,7 @@ pub fn metaParse(a: std.mem.Allocator, text: []const u8) !RunRecord {
         .finished_at = finished_at,
         .exit_code = exit_code,
         .timed_out = timed_out,
+        .created_by = created_by,
     };
 }
 

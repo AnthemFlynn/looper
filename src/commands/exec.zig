@@ -48,6 +48,27 @@ const RunRecord = runs_mod.RunRecord;
 /// timeouts without burning real seconds.
 const POLL_INTERVAL_NS: u64 = 100 * 1_000_000;
 
+/// Process-local counter for run_ids that `_exec` synthesizes when cron
+/// invokes the wrapper without an explicit `--run-id`. PID disambiguates
+/// across processes (two cron-fires in the same second land in
+/// different processes); the counter handles intra-process repeats.
+var auto_run_counter: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+
+/// Synthesize a fresh run_id for a recurring captured job whose cron
+/// wrapper line carries no `--run-id`. Format: `<source>-<epoch-hex>-<pid>-<n>`.
+/// - `<source>` prefix clusters records under their originating job in
+///   sorted listings.
+/// - `<epoch-hex>` is the start-of-second resolution wall clock.
+/// - `<pid>` resolves collisions between same-second cron-fires (each
+///   `_exec` is a fresh process and gets a fresh counter at 0).
+/// - `<n>` disambiguates multiple `_exec` calls within one process,
+///   which is the test-harness path but harmless in production.
+fn autoRunId(a: std.mem.Allocator, source_id: []const u8) []const u8 {
+    const n = auto_run_counter.fetchAdd(1, .monotonic);
+    const pid = c.getpid();
+    return std.fmt.allocPrint(a, "{s}-{x}-{d}-{d}", .{ source_id, posix.nowEpoch(), pid, n }) catch source_id;
+}
+
 /// Grace period between SIGTERM and SIGKILL when a child blows its
 /// timeout. Most well-behaved processes exit on SIGTERM; only the truly
 /// stuck need the SIGKILL hammer.
@@ -163,11 +184,41 @@ pub fn cmdExec(
     once_flag: bool,
     cmd_argv: []const []const u8,
 ) !void {
-    if (run_id.len == 0) {
-        posix.eprint("looper _exec: --run-id is required\n", .{});
+    return cmdExecWithOwner(ctx, run_id, source_id, null, timeout_secs, target_label, once_flag, cmd_argv);
+}
+
+/// `cmdExec` plus an explicit `created_by` (the principal owning the
+/// underlying source job). Cron-fired _exec invocations look this up via
+/// `--owner` (parsed in main.zig); manual paths like `cmdRun` pass it
+/// directly from the in-memory Job. Stored on the run record so
+/// `runs ls --owner` can filter by it.
+pub fn cmdExecWithOwner(
+    ctx: *Ctx,
+    run_id_in: []const u8,
+    source_id: ?[]const u8,
+    created_by: ?[]const u8,
+    timeout_secs: ?u32,
+    target_label: ?[]const u8,
+    once_flag: bool,
+    cmd_argv: []const []const u8,
+) !void {
+    // Recurring captured jobs don't pin a run_id in their marker — the
+    // marker's run_id is the "series anchor" for one-shots only. When
+    // cron fires the wrapper line for such a job, `--run-id` is absent
+    // and we synthesize one here, anchored to the source_id. Without
+    // this branch, the cron-fired captured-recurring path is dead.
+    //
+    // One-shots and the manual `looper run` path both pass `run_id_in`
+    // explicitly, so they're unaffected.
+    const run_id: []const u8 = if (run_id_in.len > 0)
+        run_id_in
+    else if (source_id) |sid|
+        autoRunId(ctx.a, sid)
+    else {
+        posix.eprint("looper _exec: --run-id is required (or pass --source-id so one can be derived)\n", .{});
         ctx.fail(2);
         return;
-    }
+    };
     if (cmd_argv.len == 0) {
         posix.eprint("looper _exec: no command given (expected positional argv after `--`)\n", .{});
         ctx.fail(2);
@@ -188,6 +239,7 @@ pub fn cmdExec(
         .once = once_flag,
         .scheduled_for = started_at, // best estimate; cron's actual scheduled time isn't passed in
         .started_at = started_at,
+        .created_by = created_by,
     });
 
     const out_path = runs_mod.outPath(ctx.a, run_id);
@@ -252,6 +304,7 @@ pub fn cmdExec(
         .finished_at = finished_at,
         .exit_code = exit_code,
         .timed_out = wait_result.timed_out,
+        .created_by = created_by,
     });
 
     if (once_flag) if (source_id) |sid| removeSourceJob(ctx, sid);
@@ -286,13 +339,43 @@ fn cleanupRun(a: std.mem.Allocator, run_id: []const u8) void {
     _ = c.rmdir(dir_z.ptr);
 }
 
-test "cmdExec rejects missing run_id with exit 2" {
+test "cmdExec rejects missing run_id when source_id is also null" {
+    // With no anchor at all there's nothing to derive a run_id from —
+    // still exit 2. The auto-gen branch only fires when source_id is
+    // present.
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var ctx = newCtx(arena.allocator());
     const argv = [_][]const u8{ "/bin/sh", "-c", "exit 0" };
     try cmdExec(&ctx, "", null, null, null, false, &argv);
     try testing.expectEqual(@as(u8, 2), ctx.exit_code);
+}
+
+test "cmdExec auto-generates run_id when source_id is present and run_id is empty" {
+    // The cron-fired captured-recurring path: wrapCommand emits no
+    // `--run-id` so `_exec` must synthesize one. Format: `<src>-<epoch>-<n>`.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = newCtx(a);
+    try cmdExec(&ctx, "", "my-source", null, null, false, &[_][]const u8{ "/bin/sh", "-c", "exit 0" });
+    try testing.expectEqual(@as(u8, 0), ctx.exit_code);
+    // Find the auto-generated record by walking listRuns and matching
+    // on source_id (we don't know the synthesized run_id from here).
+    const all = try runs_mod.listRuns(a);
+    var found_run_id: ?[]const u8 = null;
+    for (all) |r| {
+        const sid = r.source_id orelse continue;
+        if (std.mem.eql(u8, sid, "my-source")) {
+            found_run_id = r.run_id;
+            break;
+        }
+    }
+    try testing.expect(found_run_id != null);
+    // Sanity-check the format: starts with the source_id prefix.
+    try testing.expect(std.mem.startsWith(u8, found_run_id.?, "my-source-"));
+    // Clean up so the synthetic record doesn't pollute later tests.
+    cleanupRun(a, found_run_id.?);
 }
 
 test "cmdExec rejects missing command with exit 2" {
@@ -390,6 +473,30 @@ test "cmdExec timeout sends SIGTERM and records timed_out=true" {
     try testing.expect(rec.finished_at != null);
     // The whole call must take ~1s + grace, not 10s.
     try testing.expect(after - before < 5);
+}
+
+test "cmdExecWithOwner stamps created_by on the run record" {
+    // HIGH#2 regression: a cron-fired _exec passing --owner=<v> must
+    // record it on the run so `runs ls --owner` can find it.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const run_id = try std.fmt.allocPrint(a, "exec-owner-{x}", .{posix.nowEpoch()});
+    defer cleanupRun(a, run_id);
+    var ctx = newCtx(a);
+    try cmdExecWithOwner(
+        &ctx,
+        run_id,
+        "src-job",
+        "agent-a",
+        null,
+        "local",
+        false,
+        &[_][]const u8{ "/bin/sh", "-c", "exit 0" },
+    );
+    const rec = (try runs_mod.metaRead(a, run_id)).?;
+    try testing.expectEqualStrings("agent-a", rec.created_by.?);
+    try testing.expectEqual(@as(?i32, 0), rec.exit_code);
 }
 
 test "cmdExec without --once leaves the source job in place" {
