@@ -13,6 +13,14 @@ const target_mod = @import("crontab/target.zig");
 const tz_mod = @import("tz.zig");
 const lock_mod = @import("lock.zig");
 
+// Adding a new verb? Three places to update in lock-step:
+//   1. This enum
+//   2. `parseCmd`'s string→Cmd map (below)
+//   3. `isMutating` if the verb writes the crontab — the lock dispatch
+//      relies on it being correctly classified or concurrent writers
+//      will silently race.
+// A future refactor could collapse (1)+(2)+(3) into a single comptime
+// table; deferred until the third dimension forces the issue.
 const Cmd = enum { ls, add, edit, rm, enable, disable, show, run, explain, import, backup, backups, restore, doctor, once, runs, exec, history, last, apply, plan, version, help, unknown };
 
 fn parseCmd(s: []const u8) Cmd {
@@ -290,12 +298,19 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // in JSON mode — they break parsability. Each JSON document carries
     // its own `target` field for disambiguation.
     const visual_multi = multi and !ctx.json;
-    // Per-target concurrency knob (v0.2 #4). The acceptance script
-    // pins "-j N must work and output must stay deterministically
-    // ordered"; the existing sequential loop satisfies that trivially.
-    // A future commit can swap in a bounded worker pool without
-    // changing this surface.
-    _ = parsed.jobs;
+    // Per-target concurrency knob (v0.2 #4). The flag is accepted for
+    // forward compatibility but v0.2's dispatch loop is sequential —
+    // the acceptance contract is deterministic per-target ordering,
+    // which sequential trivially satisfies. When the operator asked
+    // for real parallelism (`-j N` with N > 1), emit a one-line stderr
+    // hint so they aren't misled about what shipped. `--quiet`
+    // suppresses the hint, matching the convention used by
+    // `--check-command` (commands/mutate.zig:72).
+    if (parsed.jobs) |n| {
+        if (n > 1 and !ctx.quiet) {
+            posix.eprint("looper: -j {d} accepted but v0.2 fan-out is sequential (bounded worker pool lands in v0.3)\n", .{n});
+        }
+    }
     for (targets) |t| {
         if (visual_multi) ctx.emit("{s}{s}=== {s} ==={s}\n", .{ ctx.k(colors.BOLD), ctx.k(colors.BLUE), t.label(a), ctx.k(colors.RESET) });
         // Cross-caller lock (v0.2 #8): only held around mutating

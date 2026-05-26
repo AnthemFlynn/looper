@@ -51,6 +51,14 @@ pub const Lock = struct {
 /// (no lock path, can't open, can't flock) returns a no-op `Lock{}` —
 /// the caller proceeds without the safety net, matching pre-v0.2
 /// behavior so single-writer use cases never break.
+///
+/// Silent-fail is deliberate, not lazy: this mirrors the precedent in
+/// `cmdAdd` wrap-by-default (commands/mutate.zig:94-104), where the
+/// safety net is best-effort and a hard error would regress users who
+/// never had concurrent writers anyway. If multi-writer correctness
+/// matters in your deployment, run `looper doctor` to verify the
+/// locks dir is writable — that's the place to surface the diagnostic,
+/// not in the hot path of every mutating command.
 pub fn acquire(a: std.mem.Allocator, t: Target) Lock {
     const lock_path = lockPathFor(a, t) orelse return .{};
     // 0o600: lock file is private to the user that opened it; no need
@@ -80,11 +88,13 @@ fn lockPathFor(a: std.mem.Allocator, t: Target) ?[]const u8 {
             // fails for any other reason, the subsequent open will fail
             // and acquire() falls back to the no-op lock.
             ensureDir(a, dir);
-            const name = if (t.user.len > 0)
-                std.fmt.allocPrint(a, "{s}/local__{s}.lock", .{ dir, t.user }) catch return null
-            else
-                std.fmt.allocPrint(a, "{s}/local.lock", .{dir}) catch return null;
-            return name;
+            // `Target.slug` sanitizes the user component to alphanumerics
+            // (with `__` separator) — same primitive `crontab/backup.zig`
+            // uses for its directory names. Interpolating `t.user` raw
+            // would let `-u "../escape"` land the lock file outside the
+            // locks dir, silently breaking serialization for any other
+            // agent using the same effective user.
+            return std.fmt.allocPrint(a, "{s}/{s}.lock", .{ dir, t.slug(a) }) catch null;
         },
         .remote => return null,
     }
@@ -146,4 +156,37 @@ test "release on a no-op lock is safe" {
     var lk: Lock = .{};
     lk.release(); // shouldn't crash
     lk.release(); // double-release is also fine
+}
+
+test "lockPathFor local target sanitizes a hostile -u value" {
+    // HIGH#1 regression guard: a user value with path-traversal bytes
+    // must NOT escape the locks directory. The whole path-after-dir
+    // segment is owned by Target.slug, which sanitizes to alphanumerics
+    // (plus the `__` separator) — so `../escape` becomes `local______escape`,
+    // not a parent-dir reference.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const t: Target = .{ .kind = .local, .user = "../escape" };
+    const lp = lockPathFor(a, t) orelse return error.NoLockPath;
+    // The basename must NOT contain `..` or `/` — the only legal
+    // separators after the locks-dir prefix.
+    const slash = std.mem.lastIndexOfScalar(u8, lp, '/') orelse return error.MalformedLockPath;
+    const basename = lp[slash + 1 ..];
+    try testing.expect(std.mem.indexOf(u8, basename, "..") == null);
+    try testing.expect(std.mem.indexOf(u8, basename, "/") == null);
+    // Sanity-check the prefix shape — should still start with "local"
+    // so the per-user vs default distinction survives sanitization.
+    try testing.expect(std.mem.startsWith(u8, basename, "local"));
+}
+
+test "lockPathFor local target without -u stays stable as local.lock" {
+    // Pin the no-user shape so the slug refactor didn't drift the
+    // default-case filename.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const t: Target = .{ .kind = .local };
+    const lp = lockPathFor(a, t) orelse return error.NoLockPath;
+    try testing.expect(std.mem.endsWith(u8, lp, "/local.lock"));
 }

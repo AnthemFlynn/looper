@@ -14,6 +14,15 @@
 //! (`--prune` flag) so a spec that accidentally omits a job doesn't
 //! silently uninstall it. v0.3 can decide; the script doesn't require it.
 //!
+//! Wrapper-refresh: `apply` does NOT refresh `wrapper_bin` on existing
+//! jobs — only newly-added jobs pick up the current `posix.looperPath`.
+//! If the operator moves the looper binary and re-runs `apply`, existing
+//! wrapped jobs continue to invoke the stale path and cron-fires will
+//! silently fail. To refresh, `rm` + re-`add` the affected jobs (or wait
+//! for a future `apply --refresh-wrapper` in v0.3). This is intentional:
+//! refreshing on every apply would mutate the crontab on no-op runs and
+//! break idempotency for the (common) case where the binary is stable.
+//!
 //! Both commands route the final write through `core.applyMutation`, so
 //! the backup-before-mutation invariant from CLAUDE.md is preserved.
 
@@ -100,7 +109,14 @@ fn convergeContent(
         // but a spec saying "every day at midnight" would diff against
         // the crontab on every plan/apply because the stored form is
         // canonical cron, not the user's English.
-        const cron = nlp.toCron(ctx.a, sj.schedule).?; // loadSpec validated
+        const cron = nlp.toCron(ctx.a, sj.schedule) orelse {
+            // Refactor guard: loadSpec already validated this schedule,
+            // so this branch should be unreachable today. Surface the
+            // bug loudly instead of `.?`-panicking if load/converge ever
+            // split across a boundary that breaks the invariant.
+            posix.eprint("looper: internal: spec schedule '{s}' reparsed to null after loadSpec validated\n", .{sj.schedule});
+            return error.InternalScheduleReparse;
+        };
         if (ct.findIndex(sj.id)) |i| {
             const j = &ct.items.items[i].job;
             // Schedule + command convergence. Only stamp last_modified_*

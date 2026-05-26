@@ -150,10 +150,17 @@ fn flushJob(
 }
 
 fn stripComment(line: []const u8) []const u8 {
-    // Comments inside quoted values aren't supported by our minimal parser;
-    // we strip from the first `#` we see, on the assumption that real specs
-    // don't embed `#` in cron schedules or commands. If that bites later, the
-    // fix is a real TOML parser, not a clever comment-stripper.
+    // KNOWN LIMITATION (deliberate, not a bug):
+    // We strip from the FIRST `#` we see, regardless of whether it's
+    // inside a `"..."` string value. So `command = "echo #1 done"`
+    // truncates to `command = "echo` and then fails parseString with
+    // "unterminated string".
+    //
+    // The right fix is a real TOML parser, NOT a comment-stripper that
+    // tracks quote state — that path always ends in reimplementing TOML
+    // badly. If a real user needs `#` in a command, that's the moment to
+    // swap in something like zig-toml. Until then, the diagnostic ("value
+    // must be a double-quoted string") at least points at the right line.
     const hash = std.mem.indexOfScalar(u8, line, '#') orelse return line;
     return std.mem.trimEnd(u8, line[0..hash], " \t");
 }
