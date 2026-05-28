@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Branching & release workflow
+
+Two trunks: **`main`** is the stable release branch (default-branch target for releases only; never committed to directly), **`dev`** is the integration branch and the GitHub default branch. Feature/fix work forks from `dev` (`feat/…`, `fix/…`, `docs/…`, `ci/…`), opens a PR **into `dev`**, and must pass the full CI matrix (native `test` on ubuntu+macOS **and** the ReleaseSafe `build` cross-targets) before merge. `main` only advances via a **release PR (base `main`, head `dev`)** once a milestone is feature-complete and its `scripts/acceptance-vX.Y.sh` is green. The `test` jobs build native debug only — they do **not** catch cross-compile breaks, so never merge with a red `build` job. Full detail in [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## What this is
 
 `looper` is a Zig 0.16 CLI that manages cron jobs — locally, for another user, on remote hosts over `ssh`, or in a plain crontab file. The source lives under `src/`, libc-only, no third-party dependencies. Built with `build.zig` (`zig build`); cross-targets are passed via `-Dtarget=...`.
