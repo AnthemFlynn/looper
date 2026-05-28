@@ -26,6 +26,7 @@ const exec = @import("commands/exec.zig");
 const once = @import("commands/once.zig");
 const history = @import("commands/history.zig");
 const apply_cmd = @import("commands/apply.zig");
+const agenda_cmd = @import("commands/agenda.zig");
 
 // core
 pub const applyMutation = core.applyMutation;
@@ -87,6 +88,11 @@ pub const cmdApply = apply_cmd.cmdApply;
 pub const cmdPlan = apply_cmd.cmdPlan;
 pub const ApplyOpts = apply_cmd.ApplyOpts;
 
+// agenda (v0.3 #10, half 1)
+pub const cmdAgenda = agenda_cmd.cmdAgenda;
+pub const AgendaOpts = agenda_cmd.AgendaOpts;
+pub const parseAgendaDuration = agenda_cmd.parseDuration;
+
 // Ensure the test harness compiles every submodule. `main.zig`'s
 // test {} block imports this file, so anything referenced here gets
 // pulled into the test binary.
@@ -102,4 +108,5 @@ test {
     _ = once;
     _ = history;
     _ = apply_cmd;
+    _ = agenda_cmd;
 }
