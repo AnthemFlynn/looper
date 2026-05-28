@@ -88,11 +88,23 @@ fn openCaptureFile(a: std.mem.Allocator, path: []const u8) c_int {
     return c.open(pz.ptr, c.O_CREAT | c.O_WRONLY | c.O_TRUNC, @as(c.mode_t, 0o644));
 }
 
+// musl's headers translate `struct timespec` to an opaque type, so
+// `c.struct_timespec` can't be instantiated by value — that broke every
+// cross-target ReleaseSafe build (the native `test` jobs only build
+// debug, so it slipped past CI). Declare the layout explicitly (it is
+// `{ time_t; long }` on every target we ship) and pass it to the libc
+// `nanosleep` via the opaque pointer the @cImport expects.
+const Timespec = extern struct {
+    tv_sec: c.time_t,
+    tv_nsec: c_long,
+};
+
 fn sleepNs(ns: u64) void {
-    var req: c.struct_timespec = .{ .tv_sec = 0, .tv_nsec = 0 };
-    req.tv_sec = @intCast(ns / 1_000_000_000);
-    req.tv_nsec = @intCast(ns % 1_000_000_000);
-    _ = c.nanosleep(&req, null);
+    var req: Timespec = .{
+        .tv_sec = @intCast(ns / 1_000_000_000),
+        .tv_nsec = @intCast(ns % 1_000_000_000),
+    };
+    _ = c.nanosleep(@ptrCast(&req), null);
 }
 
 /// Wait for `pid` with optional timeout. Returns the libc-style status
