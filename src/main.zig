@@ -21,7 +21,7 @@ const lock_mod = @import("lock.zig");
 //      will silently race.
 // A future refactor could collapse (1)+(2)+(3) into a single comptime
 // table; deferred until the third dimension forces the issue.
-const Cmd = enum { ls, add, edit, rm, enable, disable, show, run, explain, import, backup, backups, restore, doctor, once, runs, exec, history, last, apply, plan, version, help, unknown };
+const Cmd = enum { ls, add, edit, rm, enable, disable, show, run, explain, import, backup, backups, restore, doctor, once, runs, exec, history, last, apply, plan, agenda, version, help, unknown };
 
 fn parseCmd(s: []const u8) Cmd {
     // Note: `set` aliases `edit` (the partial-update command), not `add`.
@@ -48,6 +48,7 @@ fn parseCmd(s: []const u8) Cmd {
         .{ "restore", Cmd.restore }, .{ "doctor", Cmd.doctor },   .{ "once", Cmd.once },       .{ "runs", Cmd.runs },
         .{ "history", Cmd.history }, .{ "last", Cmd.last },
         .{ "apply", Cmd.apply },     .{ "plan", Cmd.plan },
+        .{ "agenda", Cmd.agenda },
         .{ "version", Cmd.version }, .{ "help", Cmd.help },
     };
     inline for (map) |e| if (std.mem.eql(u8, s, e[0])) return e[1];
@@ -171,6 +172,23 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // target read failures that the loop below treats as fatal-per-target.
     if (cmd == .doctor) {
         try cmds.cmdDoctor(&ctx, targets, hosts_cfg_path, resolved.use_all);
+        ctx.flush();
+        if (ctx.exit_code != 0) std.process.exit(ctx.exit_code);
+        return;
+    }
+
+    // `agenda` owns its own iteration: it produces a single merged
+    // chronological list across all targets, not the per-target shape
+    // every other read verb emits. Per-target read failures are
+    // reported but don't abort the agenda — one unreachable host
+    // shouldn't blind the caller to upcoming fires elsewhere.
+    if (cmd == .agenda) {
+        const limit = parsed.limit orelse 20;
+        try cmds.cmdAgenda(&ctx, targets, .{
+            .limit = limit,
+            .within_secs = parsed.within_secs,
+            .owner = parsed.owner,
+        }, ctx.no_target_tz);
         ctx.flush();
         if (ctx.exit_code != 0) std.process.exit(ctx.exit_code);
         return;

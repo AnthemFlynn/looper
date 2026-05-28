@@ -138,7 +138,33 @@ drift detection, end-to-end verification.
   <id>`. Outside-in smoke test: schedule resolves, daemon active, wrapper
   resolvable, command resolvable.
 
-### v0.4 agent power tools
+### v0.4 remote deployment
+
+Agent self-sufficiency on remote hosts. v0.1–v0.3 give agents the *cron line*
+surface; this milestone gives them the *files cron references* — without
+agents having to shell out to `scp` / `rsync` / `ansible.copy` and maintain
+a parallel lifecycle. Looper still doesn't become a config-management tool:
+it owns the deployment unit of `(cron line, files cron references)`, nothing
+else. Credentials are explicitly inherited from the caller's ssh environment
+— never stored, never managed.
+
+- [#27](https://github.com/AnthemFlynn/looper/issues/27) — `looper push` /
+  `unpush` — single-file ssh deployment with provenance tracking. One
+  primitive, symmetric removal.
+- [#28](https://github.com/AnthemFlynn/looper/issues/28) — `looper push
+  --bundle` — multi-file tar-pipe over one ssh round trip. Fleet-friendly
+  for scripts with helper files.
+- [#29](https://github.com/AnthemFlynn/looper/issues/29) — `looper add
+  --inline-script` — embed small (~4KB encoded) scripts directly in the
+  cron line via base64 + shebang detection. Zero remote files, zero cleanup.
+- [#30](https://github.com/AnthemFlynn/looper/issues/30) — extend `apply`
+  spec format with `[[file]]` blocks. Atomic file+job deployment with
+  rollback on partial failure; `destroy` is the symmetric inverse.
+- [#31](https://github.com/AnthemFlynn/looper/issues/31) — formalize the
+  credential-passthrough contract. Looper never stores ssh credentials;
+  the contract gets explicit docs in `CLAUDE.md` / `README.md` / `ROADMAP.md`.
+
+### v0.5 agent power tools
 
 Tightens the agent loop beyond v0.1's basics. With these shipped, agents
 can push-subscribe to events, detect missed fires, stream live output,
@@ -156,7 +182,7 @@ query history structurally, and replay past invocations.
 - [#15](https://github.com/AnthemFlynn/looper/issues/15) — `looper replay
   <run_id>` — re-execute a past invocation with full wrap, linked to original.
 
-### v0.5 ops integration
+### v0.6 ops integration
 
 Makes looper deployable into real ops stacks. Metrics flow into Prometheus
 via the daemon-free textfile-collector pattern, extensibility lives in
@@ -180,10 +206,10 @@ via catchup semantics, multi-tenancy stays safe via per-owner quotas.
   Caps on jobs and run rate per principal; prevents runaway agent loops
   from monopolizing shared infrastructure.
 
-### v0.6 ergonomics
+### v0.7 ergonomics
 
-The "feels modern" layer for humans. v0.4 and v0.5 serve agents and ops;
-v0.6 serves the humans who maintain looper-managed systems day to day.
+The "feels modern" layer for humans. v0.4–v0.6 serve agents and ops;
+v0.7 serves the humans who maintain looper-managed systems day to day.
 
 - [#21](https://github.com/AnthemFlynn/looper/issues/21) — `looper edit -e`
   — open the full crontab in `$EDITOR`, validate on save. The safer
@@ -198,7 +224,7 @@ v0.6 serves the humans who maintain looper-managed systems day to day.
 - [#25](https://github.com/AnthemFlynn/looper/issues/25) — iCal export.
   Subscribe to looper's schedule from Apple Calendar / Google Calendar.
 
-### v0.7 mcp (RFC)
+### v0.8 mcp (RFC)
 
 Native MCP server surface so agents can call looper via tool-use protocol
 directly, with typed inputs and outputs, instead of shell + JSON parsing.
@@ -206,9 +232,9 @@ directly, with typed inputs and outputs, instead of shell + JSON parsing.
 Deliberately sequenced last: MCP is an *interface* over what the CLI does,
 not a new capability. Designing it before the CLI surface stabilizes means
 perpetual churn — ship MCP at v0.3 and you'd be retrofitting tools to it
-every milestone as `subscribe`, `missed`, `query`, `replay`, `metrics`,
-`hooks`, `audit`, `catchup`, `quotas`, `export` each landed. Waiting until
-v0.6 lets MCP expose the stable thing once.
+every milestone as `push`, `subscribe`, `missed`, `query`, `replay`,
+`metrics`, `hooks`, `audit`, `catchup`, `quotas`, `export` each landed.
+Waiting until v0.7 lets MCP expose the stable thing once.
 
 - [#9](https://github.com/AnthemFlynn/looper/issues/9) — design
   discussion before implementation. Several questions need answers first
@@ -260,6 +286,10 @@ These are widening moves we will not take, regardless of demand:
 - Adversarial multi-tenancy. The trust model is "honest agents on shared
   infrastructure," not adversarial multi-tenant isolation.
 - Distributed consensus across targets.
+- Looper-managed ssh credentials / keyring / on-disk identity files.
+  Credentials are inherited from the caller's process environment
+  (`SSH_AUTH_SOCK` / `~/.ssh/config`) and scoped to the looper process
+  lifetime. Out of scope, by design — ssh tooling owns ssh credentials.
 
 Each of these has real competitors (Airflow, Prefect, systemd timers,
 n8n, Temporal). Looper's wedge is the *safe, observable, deployable CLI

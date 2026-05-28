@@ -3,7 +3,7 @@
 # failure. Useful for "is the whole roadmap complete?" checks.
 #
 # Usage:
-#   ./scripts/acceptance-all.sh                 # run v0.1 → v0.7
+#   ./scripts/acceptance-all.sh                 # run v0.1 → v0.8
 #   ./scripts/acceptance-all.sh --through v0.3  # run v0.1 → v0.3 only
 #
 # Honors LOOPER_BIN like the individual scripts.
@@ -26,7 +26,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-for v in v0.1 v0.2 v0.3 v0.4 v0.5 v0.6 v0.7; do
+for v in v0.1 v0.2 v0.3 v0.4 v0.5 v0.6 v0.7 v0.8; do
   echo
   echo "============================================================"
   echo "  $v acceptance"

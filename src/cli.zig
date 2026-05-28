@@ -96,6 +96,14 @@ pub const ParsedArgs = struct {
     /// script pins. Bounded thread pool lands in a follow-up commit when
     /// per-target probes become the dominant latency.
     jobs: ?usize,
+    /// `agenda -n N`: cap on returned events. Null → default 20 in the
+    /// dispatcher. Pre-parsed to usize so a bogus value fails at argv
+    /// rather than inside the command.
+    limit: ?usize,
+    /// `agenda --within <duration>`: cutoff in seconds from now. Parsed
+    /// via `commands.parseAgendaDuration` so the flag accepts `30m`,
+    /// `24h`, `7d`, `2w`, or a bare integer (seconds).
+    within_secs: ?i64,
     force_help: bool,
     /// Set to the offending arg when an unknown option (e.g. `--frob`)
     /// is encountered. Parsing stops at the first unknown option so
@@ -165,6 +173,8 @@ pub fn parseArgv(a: std.mem.Allocator, argv: []const []const u8, ctx: *ctx_mod.C
         .owner = null,
         .no_wrap = false,
         .jobs = null,
+        .limit = null,
+        .within_secs = null,
         .force_help = false,
         .bad_option = null,
     };
@@ -426,6 +436,56 @@ pub fn parseArgv(a: std.mem.Allocator, argv: []const []const u8, ctx: *ctx_mod.C
             i += 1;
             if (i < argv.len) {
                 p.jobs = std.fmt.parseInt(usize, argv[i], 10) catch {
+                    p.bad_option = argv[i];
+                    p.positionals = try positionals.toOwnedSlice(a);
+                    p.hosts = try hosts.toOwnedSlice(a);
+                    return p;
+                };
+            }
+            continue;
+        }
+        // `agenda -n N` / `--limit N` — cap on returned events. Parsed to
+        // usize up-front so a bad value is an argv error, not an in-command
+        // recovery path.
+        if (equalsValue(arg, "--limit")) |v| {
+            p.limit = std.fmt.parseInt(usize, v, 10) catch {
+                p.bad_option = v;
+                p.positionals = try positionals.toOwnedSlice(a);
+                p.hosts = try hosts.toOwnedSlice(a);
+                return p;
+            };
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--limit")) {
+            i += 1;
+            if (i < argv.len) {
+                p.limit = std.fmt.parseInt(usize, argv[i], 10) catch {
+                    p.bad_option = argv[i];
+                    p.positionals = try positionals.toOwnedSlice(a);
+                    p.hosts = try hosts.toOwnedSlice(a);
+                    return p;
+                };
+            }
+            continue;
+        }
+        // `agenda --within <duration>` — cutoff. Accepts `30m`, `24h`,
+        // `7d`, `2w`, or a bare integer (seconds). Parse via the same
+        // helper the command exports so the rules are defined once.
+        if (equalsValue(arg, "--within")) |v| {
+            const agenda_cmd = @import("commands/agenda.zig");
+            p.within_secs = agenda_cmd.parseDuration(v) orelse {
+                p.bad_option = v;
+                p.positionals = try positionals.toOwnedSlice(a);
+                p.hosts = try hosts.toOwnedSlice(a);
+                return p;
+            };
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--within")) {
+            i += 1;
+            if (i < argv.len) {
+                const agenda_cmd = @import("commands/agenda.zig");
+                p.within_secs = agenda_cmd.parseDuration(argv[i]) orelse {
                     p.bad_option = argv[i];
                     p.positionals = try positionals.toOwnedSlice(a);
                     p.hosts = try hosts.toOwnedSlice(a);
@@ -971,6 +1031,8 @@ test "buildTargets default = local" {
         .owner = null,
         .no_wrap = false,
         .jobs = null,
+        .limit = null,
+        .within_secs = null,
         .force_help = false,
         .bad_option = null,
     };
@@ -1007,6 +1069,8 @@ test "buildTargets file path → one file target" {
         .owner = null,
         .no_wrap = false,
         .jobs = null,
+        .limit = null,
+        .within_secs = null,
         .force_help = false,
         .bad_option = null,
     };
@@ -1045,6 +1109,8 @@ test "buildTargets -H hosts → one remote per host, sharing user" {
         .owner = null,
         .no_wrap = false,
         .jobs = null,
+        .limit = null,
+        .within_secs = null,
         .force_help = false,
         .bad_option = null,
     };
@@ -1083,6 +1149,8 @@ test "buildTargets --all parses hosts file, ignores blank/comment lines" {
         .owner = null,
         .no_wrap = false,
         .jobs = null,
+        .limit = null,
+        .within_secs = null,
         .force_help = false,
         .bad_option = null,
     };
@@ -1129,6 +1197,8 @@ test "buildTargets --all empty hosts file → empty list" {
         .owner = null,
         .no_wrap = false,
         .jobs = null,
+        .limit = null,
+        .within_secs = null,
         .force_help = false,
         .bad_option = null,
     };
@@ -1164,6 +1234,8 @@ test "buildTargets --all + -u applies user to every remote" {
         .owner = null,
         .no_wrap = false,
         .jobs = null,
+        .limit = null,
+        .within_secs = null,
         .force_help = false,
         .bad_option = null,
     };
