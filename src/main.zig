@@ -21,7 +21,7 @@ const lock_mod = @import("lock.zig");
 //      will silently race.
 // A future refactor could collapse (1)+(2)+(3) into a single comptime
 // table; deferred until the third dimension forces the issue.
-const Cmd = enum { ls, add, edit, rm, enable, disable, show, run, explain, import, backup, backups, restore, doctor, once, runs, exec, history, last, apply, plan, agenda, diff, version, help, unknown };
+const Cmd = enum { ls, add, edit, rm, enable, disable, show, run, explain, import, backup, backups, restore, doctor, once, runs, exec, history, last, apply, plan, agenda, diff, verify, version, help, unknown };
 
 fn parseCmd(s: []const u8) Cmd {
     // Note: `set` aliases `edit` (the partial-update command), not `add`.
@@ -48,7 +48,7 @@ fn parseCmd(s: []const u8) Cmd {
         .{ "restore", Cmd.restore }, .{ "doctor", Cmd.doctor },   .{ "once", Cmd.once },       .{ "runs", Cmd.runs },
         .{ "history", Cmd.history }, .{ "last", Cmd.last },
         .{ "apply", Cmd.apply },     .{ "plan", Cmd.plan },
-        .{ "agenda", Cmd.agenda },   .{ "diff", Cmd.diff },
+        .{ "agenda", Cmd.agenda },   .{ "diff", Cmd.diff },       .{ "verify", Cmd.verify },
         .{ "version", Cmd.version }, .{ "help", Cmd.help },
     };
     inline for (map) |e| if (std.mem.eql(u8, s, e[0])) return e[1];
@@ -452,6 +452,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
             // target; cmdDiff calls ctx.fail(1) on drift so the process
             // exit code is nonzero if any target has drifted.
             .diff => try cmds.cmdDiff(&ctx, t, content),
+            // `verify <id>` smoke-tests one job; `verify` (no id) checks
+            // every managed job. Read-only; cmdVerify calls ctx.fail on a
+            // failed check (or a missing id) so the exit code is the
+            // agent's cheap go/no-go signal.
+            .verify => try cmds.cmdVerify(&ctx, t, content, tz, if (rest.len > 0) rest[0] else null),
             else => {},
         }
         if (visual_multi) ctx.emit("\n", .{});
