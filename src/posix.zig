@@ -11,11 +11,22 @@ pub const c = @cImport({
     @cInclude("string.h");
     @cInclude("sys/wait.h");
     @cInclude("sys/stat.h");
+    @cInclude("sys/file.h"); // flock(2) — needed by cross-caller locking (v0.2 #8)
     @cInclude("fcntl.h");
     @cInclude("dirent.h");
     @cInclude("time.h");
     @cInclude("signal.h"); // kill(2), SIGTERM/SIGKILL — needed by _exec timeout
 });
+
+// `flock(2)` LOCK_* constants. Importing them from `sys/file.h` via
+// `@cImport` is unreliable (Zig translate-c sometimes drops these macros
+// depending on host headers), so we pin the canonical Linux + macOS
+// values directly. POSIX doesn't standardize flock — these values come
+// from the BSD lineage shared by both Linux and macOS.
+pub const LOCK_SH: c_int = 1;
+pub const LOCK_EX: c_int = 2;
+pub const LOCK_NB: c_int = 4;
+pub const LOCK_UN: c_int = 8;
 
 pub fn getenv(name: [*:0]const u8) ?[]const u8 {
     const v = c.getenv(name) orelse return null;

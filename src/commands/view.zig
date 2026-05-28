@@ -20,15 +20,39 @@ const Ctx = ctx_mod.Ctx;
 const Target = target_mod.Target;
 const TzInfo = tz_mod.TzInfo;
 
-pub fn cmdLs(ctx: *Ctx, t: Target, content: []const u8, tz: TzInfo) !void {
+/// Options for `cmdLs`. Bundled so adding new filters (status, tag,
+/// modified-since) doesn't require touching every caller signature.
+pub const LsOpts = struct {
+    /// `--owner <principal>` filter — when set, only jobs whose
+    /// `created_by` matches appear in the output. Foreign jobs (no
+    /// marker, so no provenance) never match a non-null owner filter.
+    owner: ?[]const u8 = null,
+};
+
+/// JSON envelope version. v0.1 introduces JSON-first; anything older
+/// emitted bare arrays without a schema version. Bumping schema_version
+/// is the breaking-change signal — adding new fields stays at v1.
+pub const SCHEMA_VERSION: u32 = 1;
+
+fn ownerMatches(j: model.Job, owner: ?[]const u8) bool {
+    const want = owner orelse return true;
+    const got = j.created_by orelse return false;
+    return std.mem.eql(u8, got, want);
+}
+
+pub fn cmdLs(ctx: *Ctx, t: Target, content: []const u8, tz: TzInfo, opts: LsOpts) !void {
     const ct = try model.parseCrontab(ctx.a, content);
     const now = posix.nowEpoch();
     if (ctx.json) {
         const target_label = t.label(ctx.a);
-        ctx.emit("[", .{});
+        ctx.emit(
+            "{{\"schema_version\":{d},\"target\":\"{s}\",\"jobs\":[",
+            .{ SCHEMA_VERSION, display.jsonEsc(ctx.a, target_label) },
+        );
         var first = true;
         for (ct.items.items) |it| switch (it) {
             .job => |j| {
+                if (!ownerMatches(j, opts.owner)) continue;
                 if (!first) ctx.emit(",", .{});
                 first = false;
                 const sched = sched_mod.parseSchedule(j.schedule) catch null;
@@ -47,6 +71,7 @@ pub fn cmdLs(ctx: *Ctx, t: Target, content: []const u8, tz: TzInfo) !void {
                         display.jsonEsc(ctx.a, tz.abbrev),      tz.offset_secs,                     tz_mod.sourceStr(tz.source),
                     },
                 );
+                emitProvenance(ctx, j);
                 if (nr_opt) |nr| {
                     const nh = humanize.fmtWhenIn(ctx.a, nr, tz);
                     ctx.emit(",\"next\":{d},\"next_human\":\"{s}\"", .{ nr, display.jsonEsc(ctx.a, nh) });
@@ -57,7 +82,7 @@ pub fn cmdLs(ctx: *Ctx, t: Target, content: []const u8, tz: TzInfo) !void {
             },
             else => {},
         };
-        ctx.emit("]\n", .{});
+        ctx.emit("]}}\n", .{});
         return;
     }
     var managed: usize = 0;
@@ -81,6 +106,7 @@ pub fn cmdLs(ctx: *Ctx, t: Target, content: []const u8, tz: TzInfo) !void {
     var fcount: usize = 0;
     for (ct.items.items) |it| switch (it) {
         .job => |j| {
+            if (!ownerMatches(j, opts.owner)) continue;
             const sched = sched_mod.parseSchedule(j.schedule) catch null;
             const nr: []const u8 = if (sched) |s| (if (core.nextFor(s, now, tz)) |xx| humanize.fmtWhenIn(ctx.a, xx, tz) else (if (s.reboot) "at boot" else "—")) else "INVALID";
             const idcol = if (j.foreign) blk: {
@@ -148,6 +174,17 @@ pub fn cmdShow(ctx: *Ctx, t: Target, content: []const u8, id: []const u8, tz: Tz
     }
 }
 
+/// Emits the four provenance fields as `,key:"value"` / `,key:null`
+/// snippets — caller must already have written the preceding object
+/// body. Stable shape across `ls`, `show`, and any future surface that
+/// needs to expose ownership metadata.
+fn emitProvenance(ctx: *Ctx, j: model.Job) void {
+    if (j.created_by) |v| ctx.emit(",\"created_by\":\"{s}\"", .{display.jsonEsc(ctx.a, v)}) else ctx.emit(",\"created_by\":null", .{});
+    if (j.created_at) |t| ctx.emit(",\"created_at\":{d}", .{t}) else ctx.emit(",\"created_at\":null", .{});
+    if (j.last_modified_by) |v| ctx.emit(",\"last_modified_by\":\"{s}\"", .{display.jsonEsc(ctx.a, v)}) else ctx.emit(",\"last_modified_by\":null", .{});
+    if (j.last_modified_at) |t| ctx.emit(",\"last_modified_at\":{d}", .{t}) else ctx.emit(",\"last_modified_at\":null", .{});
+}
+
 /// Emits a JSON array of {epoch, human} pairs for the next N fires of
 /// `sched` starting from `from_utc`. Shared between show and explain so
 /// the contract is identical.
@@ -172,15 +209,16 @@ fn cmdShowJson(ctx: *Ctx, t: Target, j: model.Job, tz: TzInfo) !void {
     const human_sched = humanize.humanize(ctx.a, j.schedule);
     const sched = sched_mod.parseSchedule(j.schedule) catch null;
     ctx.emit(
-        "{{\"target\":\"{s}\",\"id\":\"{s}\",\"enabled\":{s}," ++
+        "{{\"schema_version\":{d},\"target\":\"{s}\",\"id\":\"{s}\",\"enabled\":{s}," ++
             "\"schedule\":\"{s}\",\"human_schedule\":\"{s}\",\"command\":\"{s}\"," ++
             "\"tz\":\"{s}\",\"tz_offset_secs\":{d},\"tz_source\":\"{s}\"",
         .{
-            display.jsonEsc(ctx.a, target_label), j.id,                                  if (j.enabled) "true" else "false",
-            display.jsonEsc(ctx.a, j.schedule),    display.jsonEsc(ctx.a, human_sched),    display.jsonEsc(ctx.a, j.command),
-            display.jsonEsc(ctx.a, tz.abbrev),     tz.offset_secs,                         tz_mod.sourceStr(tz.source),
+            SCHEMA_VERSION,                       display.jsonEsc(ctx.a, target_label), j.id,                                  if (j.enabled) "true" else "false",
+            display.jsonEsc(ctx.a, j.schedule),   display.jsonEsc(ctx.a, human_sched),  display.jsonEsc(ctx.a, j.command),
+            display.jsonEsc(ctx.a, tz.abbrev),    tz.offset_secs,                       tz_mod.sourceStr(tz.source),
         },
     );
+    emitProvenance(ctx, j);
     if (sched) |s| {
         ctx.emit(",\"reboot\":{s},\"next\":", .{if (s.reboot) "true" else "false"});
         if (s.reboot) {
@@ -196,6 +234,24 @@ fn cmdShowJson(ctx: *Ctx, t: Target, j: model.Job, tz: TzInfo) !void {
     ctx.emit("}}\n", .{});
 }
 
+const exec_mod = @import("exec.zig");
+
+/// Process-local monotonic counter appended to manualRunId. The epoch
+/// prefix is unique across processes; the counter disambiguates within
+/// the same process (and the same second). Wraps at u32 — anything
+/// invoking `looper run` 4 billion times in one process has bigger
+/// problems than run_id collisions.
+var manual_run_counter: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+
+/// Synthesize a unique run_id for `looper run` invocations. Format is
+/// "manual-<epoch-hex>-<counter>-<id>" — collision-safe across
+/// processes (via the epoch) and within a process (via the atomic
+/// counter), and human-recognizable as "this came from a manual run".
+fn manualRunId(a: std.mem.Allocator, id: []const u8) []const u8 {
+    const n = manual_run_counter.fetchAdd(1, .monotonic);
+    return std.fmt.allocPrint(a, "manual-{x}-{d}-{s}", .{ posix.nowEpoch(), n, id }) catch "manual";
+}
+
 pub fn cmdRun(ctx: *Ctx, t: Target, content: []const u8, id: []const u8) !void {
     const ct = try model.parseCrontab(ctx.a, content);
     const idx = ct.findIndex(id) orelse {
@@ -203,27 +259,47 @@ pub fn cmdRun(ctx: *Ctx, t: Target, content: []const u8, id: []const u8) !void {
         ctx.fail(1);
         return;
     };
-    const cmd = ct.items.items[idx].job.command;
-    ctx.emit("{s}running '{s}' on {s}…{s}\n", .{ ctx.k(colors.DIM), id, t.label(ctx.a), ctx.k(colors.RESET) });
-    ctx.flush();
-    var argv: std.ArrayList([]const u8) = .empty;
+    const job = ct.items.items[idx].job;
+    const cmd = job.command;
+
+    // Remote targets keep the legacy inherit-stream behavior — capturing
+    // a remote run to local files makes little sense, and v0.1's
+    // acceptance loop is local-only. Local + file targets route through
+    // _exec so a run record lands under state_dir/runs/, making the run
+    // visible to `history`, `last`, and `runs ls`.
     if (t.kind == .remote) {
+        ctx.emit("{s}running '{s}' on {s}…{s}\n", .{ ctx.k(colors.DIM), id, t.label(ctx.a), ctx.k(colors.RESET) });
+        ctx.flush();
+        var argv: std.ArrayList([]const u8) = .empty;
         try argv.appendSlice(ctx.a, try target_mod.sshArgvPrefix(ctx.a, t.host));
         try argv.append(ctx.a, cmd);
-    } else {
-        try argv.append(ctx.a, "/bin/sh");
-        try argv.append(ctx.a, "-c");
-        try argv.append(ctx.a, cmd);
+        const code = posix.runInherit(ctx.a, argv.items) catch 1;
+        if (code != 0) {
+            const u: u8 = if (code < 0 or code > 255) 1 else @intCast(code);
+            ctx.fail(u);
+        }
+        ctx.emit("{s}exit {d}{s}\n", .{ if (code == 0) ctx.k(colors.GREEN) else ctx.k(colors.RED), code, ctx.k(colors.RESET) });
+        return;
     }
-    const code = posix.runInherit(ctx.a, argv.items) catch 1;
-    if (code != 0) {
-        // Clamp to u8 so the exit code surfaces in shell `$?`. A negative
-        // child status (e.g., killed by signal, returns -1 from waitpid)
-        // collapses to 1; otherwise we propagate the real value.
-        const u: u8 = if (code < 0 or code > 255) 1 else @intCast(code);
-        ctx.fail(u);
+
+    const run_id = manualRunId(ctx.a, id);
+    const argv = [_][]const u8{ "/bin/sh", "-c", cmd };
+    if (!ctx.json and !ctx.quiet) {
+        ctx.emit("{s}running '{s}' on {s} (run_id={s})…{s}\n", .{
+            ctx.k(colors.DIM), id, t.label(ctx.a), run_id, ctx.k(colors.RESET),
+        });
+        ctx.flush();
     }
-    ctx.emit("{s}exit {d}{s}\n", .{ if (code == 0) ctx.k(colors.GREEN) else ctx.k(colors.RED), code, ctx.k(colors.RESET) });
+    try exec_mod.cmdExecWithOwner(
+        ctx,
+        run_id,
+        id, // source_id = job id
+        job.created_by, // copy provenance from the source job
+        null, // no timeout for manual runs
+        t.label(ctx.a),
+        false, // never self-remove from `looper run`
+        argv[0..],
+    );
 }
 
 pub fn cmdExplain(ctx: *Ctx, input: []const u8) !void {
@@ -243,12 +319,12 @@ pub fn cmdExplain(ctx: *Ctx, input: []const u8) !void {
         const interpreted = !std.mem.eql(u8, schedule, input);
         const human_sched = humanize.humanize(ctx.a, schedule);
         ctx.emit(
-            "{{\"input\":\"{s}\",\"schedule\":\"{s}\",\"human_schedule\":\"{s}\"," ++
+            "{{\"schema_version\":{d},\"input\":\"{s}\",\"schedule\":\"{s}\",\"human_schedule\":\"{s}\"," ++
                 "\"interpreted\":{s},\"reboot\":{s},\"tz\":\"{s}\",\"tz_offset_secs\":{d},\"next\":",
             .{
-                display.jsonEsc(ctx.a, input),    display.jsonEsc(ctx.a, schedule), display.jsonEsc(ctx.a, human_sched),
+                SCHEMA_VERSION,                       display.jsonEsc(ctx.a, input),    display.jsonEsc(ctx.a, schedule), display.jsonEsc(ctx.a, human_sched),
                 if (interpreted) "true" else "false", if (sched.reboot) "true" else "false",
-                display.jsonEsc(ctx.a, tz.abbrev), tz.offset_secs,
+                display.jsonEsc(ctx.a, tz.abbrev),    tz.offset_secs,
             },
         );
         if (sched.reboot) {
@@ -302,7 +378,7 @@ test "cmdLs --json emits next:null and next_human:null for @reboot" {
     ctx.buf.clearRetainingCapacity();
     const content = try target_mod.readFileAll(a, tgt.path);
     const tz = tz_mod.controllerTz(a);
-    try cmdLs(&ctx, tgt, content, tz);
+    try cmdLs(&ctx, tgt, content, tz, .{});
     // @reboot has no next-run; ensure JSON gives a real null, not "next:0".
     try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"next\":null") != null);
     try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"next_human\":null") != null);
@@ -322,7 +398,7 @@ test "cmdLs --json carries target, human_schedule, tz_source" {
     ctx.buf.clearRetainingCapacity();
     const content = try target_mod.readFileAll(a, tgt.path);
     const tz = tz_mod.controllerTz(a);
-    try cmdLs(&ctx, tgt, content, tz);
+    try cmdLs(&ctx, tgt, content, tz, .{});
     try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"target\":\"file:") != null);
     try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"human_schedule\":\"at 03:00 every day\"") != null);
     try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"tz_source\":\"controller_local\"") != null);

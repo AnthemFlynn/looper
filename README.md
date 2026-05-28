@@ -79,12 +79,14 @@ looper <command> [args] [options]
 
 Commands
   ls                       list jobs (managed + unmanaged) with next run times
-  add <schedule> <cmd>     add or update a job (idempotent; --id to name it)
+  add <schedule> <cmd>     add or update a job (idempotent; wraps by default; --id to name it)
   edit <id>                partial update: --schedule X and/or --command Y
   rm <id|fN>...            remove job(s) by id, or unmanaged ones by fN handle
   enable / disable <id...> toggle a job without deleting its definition
-  show <id>                detail: meaning + next 5 run times
-  run <id>                 run a job's command right now (streamed output)
+  show <id>                detail: meaning + next 5 run times + provenance
+  run <id>                 run a job's command right now (produces a run record)
+  history <id>             list past runs for a job (newest first)
+  last <id>                show the most recent run for a job
   explain <schedule>       explain a cron expression + next runs (writes nothing)
   once <when> <command>    schedule a one-shot; fires once then self-removes
   import                   adopt existing unmanaged jobs into looper
@@ -93,7 +95,7 @@ Commands
   backups prune --keep N   remove older snapshots, keep the newest N
   restore [file|--from S]  roll back to the newest, a named file, or a stamp
   doctor                   preflight: crontab/ssh, backup dir, hosts file, targets
-  runs ls                  list captured runs (one-shots + --capture jobs)
+  runs ls                  list captured runs (one-shots + wrapped jobs)
   runs show <run_id>       inspect a single run: meta, stdout, stderr, exit code
   runs prune --older-than  remove run records older than the given seconds
   version | help
@@ -107,15 +109,25 @@ Target (default: your local crontab)
 Options
       --dry-run            show the diff that would be written; write nothing
   -y, --yes                assume yes (required for destructive ops without a tty)
-      --json               machine-readable output (ls, show, explain, runs, dry-run)
+      --json               machine-readable output (auto-enabled when stdout is not a TTY)
   -q, --quiet              only print errors
       --no-color           disable color (also honored: NO_COLOR)
       --no-target-tz       skip remote TZ probe; render everything as controller-local
+      --as <principal>     (add/edit) stamp this actor on the job (env: LOOPER_AS)
+      --owner <principal>  (ls/runs ls) filter to jobs/runs owned by this principal
+      --no-wrap            (add) opt out of wrap-by-default — produce a bare cron line
+      --capture            (add) synonym for the default (kept for compatibility)
       --check-command      (add) warn if the command binary isn't on the target
-      --capture            (add) wrap the cron payload to capture stdout/stderr + exit code
       --status <s>         (runs ls) filter by pending|running|done|failed
       --older-than <secs>  (runs prune) cutoff age in seconds (default 30 days)
       --full               (runs show) emit full captured output, no inline cap
+
+Environment
+  LOOPER_AS                fallback for --as (agents typically export this once)
+  LOOPER_CRONTAB_FILE      fallback for --file when no other target is supplied
+  XDG_STATE_HOME           base for backups and run records (default ~/.local/state)
+  XDG_CONFIG_HOME          base for the --all hosts file (default ~/.config)
+  NO_COLOR                 disable color output (any non-empty value)
 ```
 
 ### Examples
@@ -213,9 +225,47 @@ looper rm report f1       # both at once
 `import` instead adopts unmanaged jobs into looper (giving them ids) rather than
 removing them.
 
+## For agents
+
+If you're an agent calling looper, the relevant primitives are:
+
+```sh
+# Stamp every job you create so you can find it again
+export LOOPER_AS=agent-a       # or pass --as agent-a per call
+
+# Install a recurring job — wraps by default, so cron's output is captured
+looper add --id job-1 "@hourly" "/opt/bin/poll.sh"
+
+# Talk to looper in JSON — auto-enabled because stdout is piped
+looper ls --owner agent-a | jq '.jobs[].id'
+
+# Read what your jobs did
+looper history job-1 | jq '.runs[0]'      # most recent run, full record
+looper last job-1    | jq '.exit_code'    # quick check
+
+# Find every record this agent ever produced
+looper runs ls --owner agent-a | jq '.runs[]'
+
+# Read captured stdout/stderr from a specific run
+looper runs show <run_id> | jq '.captured.stdout'
+```
+
+The full v0.1 agent-loop contract lives in [scripts/acceptance-v0.1.sh](scripts/acceptance-v0.1.sh)
+— exit 0 means looper is shippable as an agent primitive. The JSON envelope
+shapes are documented in [docs/JSON_SCHEMA.md](docs/JSON_SCHEMA.md).
+
 ## How it stores jobs
 
-A managed job is two lines in the crontab — a marker plus the real cron line:
+A managed job is two lines in the crontab — a marker plus the real cron line.
+Under wrap-by-default, the cron line invokes the internal `_exec` wrapper so
+every fire produces a captured run record:
+
+```
+#looper# id=db-backup enabled=1 capture=1 wrapper_bin=/usr/local/bin/looper created_by=agent-a created_at=1779697144 last_modified_by=agent-a last_modified_at=1779697144
+0 3 * * * /usr/local/bin/looper _exec --source-id=db-backup --owner=agent-a -- /bin/sh -c '/usr/local/bin/backup.sh --db'
+```
+
+The legacy bare-cron shape is still available with `--no-wrap`:
 
 ```
 #looper# id=db-backup enabled=1
@@ -284,20 +334,36 @@ stderr, exit code, and timing are all captured to the runs store automatically.
 v1 is local-target only; remote one-shots add per-target wrapper resolution
 issues that are tracked separately.
 
-### `looper add --capture <schedule> <command>`
+### `looper add <schedule> <command>` (wraps by default)
 
-Wraps a recurring job's cron payload with the internal `_exec` subcommand
-before writing it. Every fire from then on records a `RunRecord` under
+Every `add` wraps the cron payload through the internal `_exec` subcommand
+before writing it. Each fire records a `RunRecord` under
 `${XDG_STATE_HOME:-~/.local/state}/looper/runs/<run_id>/`:
 
 ```
-meta — newline key=value lines: source_id, started_at, finished_at, exit_code, timed_out
+meta — newline key=value lines: source_id, started_at, finished_at, exit_code, timed_out, created_by
 out  — the run's captured stdout
 err  — the run's captured stderr
 ```
 
-`edit --capture` and `edit --no-capture` flip the bit on an existing job
-without reflowing the cron line.
+Pass `--no-wrap` to opt out and produce a bare cron line — useful for jobs you
+deliberately want to behave like classic cron (silent on success, mail-on-output).
+Capture is sticky on update: re-adding the same id without `--no-wrap` keeps
+the wrap. To remove capture, `rm` the job and re-add it with `--no-wrap`.
+
+### `looper history <id>` / `looper last <id>`
+
+Read the runs your jobs have produced. Both query the local runs store filtered
+by `source_id`:
+
+```sh
+looper history db-backup                    # newest-first list of past runs
+looper last db-backup                       # the most recent run record
+looper history db-backup | jq '.runs[0]'    # JSON for piping
+```
+
+`history` returns the full list under `runs: [...]`; `last` returns the most
+recent record at the top level. Both exit `1` when no records match an id.
 
 ### `looper runs ls / show / prune`
 
@@ -369,45 +435,92 @@ TZ for each remote target so you can verify it once and forget it.
 
 ## JSON output
 
-`--json` produces machine-readable output for `ls`, `show`, `explain`, and
-`--dry-run` mutations. Flag position is free — `looper show db-backup --json`,
-`looper --json show db-backup`, and any other interleaving produce the same
-output. Multi-target invocations emit one JSON document per target (one `ls`
-array per host, one `show` object per host, etc.) — the human-readable
-`=== host ===` headers are suppressed under `--json` so the output stays
-parseable. Every document carries its own `target` field so the hosts are
-disambiguated.
+JSON is the auto-default whenever stdout is not a TTY — piping to `jq`, capturing
+to a file, or calling looper from an agent all enable it without `--json`. Pass
+`--json` explicitly when you need it on a TTY. Flag position is free.
 
-**`ls`** — array of jobs:
+Every JSON document carries a `schema_version` field (currently `1`) and uses an
+envelope shape — `ls` and `runs ls` wrap their arrays under a key so future
+additions stay non-breaking. Field names are snake_case; missing values are
+`null` (never `0`, never `""`). The full contract lives in
+[docs/JSON_SCHEMA.md](docs/JSON_SCHEMA.md).
+
+**`ls`** — `{schema_version, target, jobs: [...]}`:
 
 ```json
-[{
-  "id": "db-backup",
-  "enabled": true,
-  "foreign": false,
+{
+  "schema_version": 1,
   "target": "sg-host",
-  "schedule": "0 3 * * *",
-  "human_schedule": "at 03:00 every day",
-  "command": "/usr/local/bin/backup.sh --db",
-  "tz": "SGT",
-  "tz_offset_secs": 28800,
-  "tz_source": "target_probed",
-  "next": 1779438000,
-  "next_human": "2026-05-22 03:00 SGT  in 12h 27m"
-}]
+  "jobs": [{
+    "id": "db-backup",
+    "enabled": true,
+    "foreign": false,
+    "target": "sg-host",
+    "schedule": "0 3 * * *",
+    "human_schedule": "at 03:00 every day",
+    "command": "/usr/local/bin/backup.sh --db",
+    "tz": "SGT",
+    "tz_offset_secs": 28800,
+    "tz_source": "target_probed",
+    "created_by": "agent-a",
+    "created_at": 1779697144,
+    "last_modified_by": "agent-a",
+    "last_modified_at": 1779697144,
+    "next": 1779438000,
+    "next_human": "2026-05-22 03:00 SGT  in 12h 27m"
+  }]
+}
 ```
 
 `next` is **`null`** (not `0`) when the schedule doesn't parse or has no next
 fire (e.g., `@reboot`); `next_human` mirrors that. `tz_source` is one of
-`controller_local`, `target_probed`, or `controller_fallback`.
+`controller_local`, `target_probed`, or `controller_fallback`. Provenance fields
+are `null` for legacy jobs added before v0.1 (or via `--no-wrap` without `--as`).
 
-**`show`** — single object, with `next` as an array of `{epoch, human}` pairs
+**`show`** — single object with the same per-job fields as `ls`, plus
+`schema_version`, `reboot`, and `next` as an array of `{epoch, human}` pairs
 covering the next 5 fires (empty for `@reboot`, `null` for unparseable schedules
 with an additional `parse_error` field).
 
-**`explain`** — single object: `input`, resolved `schedule`, `human_schedule`,
-`interpreted` (true if NLP rewrote the input), `reboot`, `tz`, `tz_offset_secs`,
-and `next` (same shape as `show`).
+**`runs ls`** — `{schema_version, runs: [...]}`. Each record carries `run_id`,
+`status` (`pending`/`running`/`done`/`failed`), `source_id`, `command`,
+`target_label`, `once`, `scheduled_for`, `started_at`, `finished_at`,
+`exit_code`, `timed_out`, and `created_by`.
+
+**`runs show <run_id>`** — single record (same shape as above) plus a
+`captured` object:
+
+```json
+{
+  "schema_version": 1,
+  "run_id": "rec-6a14a88a-97053-0",
+  "status": "done",
+  "source_id": "rec",
+  "exit_code": 0,
+  "created_by": "agent-a",
+  "captured": {
+    "stdout": "hello\n",
+    "stdout_total_bytes": 6,
+    "stdout_truncated": false,
+    "stderr": "",
+    "stderr_total_bytes": 0,
+    "stderr_truncated": false
+  }
+}
+```
+
+Pass `--full` to lift the 8 KiB inline cap on stdout/stderr.
+
+**`history <id>`** — `{schema_version, id, runs: [...]}` with the same record
+shape as `runs ls`.
+
+**`last <id>`** — single record at the top level (with `schema_version` + `id`
+alongside); `{"run": null, "id": "...", "schema_version": 1}` and exit 1 when
+no records match.
+
+**`explain`** — single object: `schema_version`, `input`, resolved `schedule`,
+`human_schedule`, `interpreted` (true if NLP rewrote the input), `reboot`, `tz`,
+`tz_offset_secs`, and `next` (array of `{epoch, human}` pairs).
 
 **`--dry-run` with a mutation** — single object:
 
@@ -428,6 +541,11 @@ and `next` (same shape as `show`).
 A no-op dry-run yields `"changed": false` with `"diff": []` so consumers can
 distinguish "ran with no work to do" from "errored."
 
+Multi-target invocations emit one JSON document per target. The
+human-readable `=== host ===` headers are suppressed under `--json` so the
+output stays parseable; each document carries its own `target` field so hosts
+are disambiguated.
+
 ## Notes & limits
 
 - **Scope is deliberate.** looper only emits standard cron. If an expression
@@ -442,38 +560,58 @@ distinguish "ran with no work to do" from "errored."
 The codebase is organized under `src/` with three subdirectories:
 
 - `src/cron/` — schedule parser, next-run calculators (controller-zone and
-  target-zone), humanizer, NLP front-end
-- `src/crontab/` — file model, target backends (local/ssh/file), backup
-  snapshots, sentinel-split crontab+TZ reader
+  target-zone), humanizer, NLP front-end, English-time parser for `once`
+- `src/crontab/` — file model with the `_exec` wrapper synthesizer, target
+  backends (local/ssh/file), backup snapshots, sentinel-split crontab+TZ
+  reader, and the run-record store
+- `src/commands/` — one file per command family (mutate / view / runs / exec
+  / history / once / backup / doctor / preflight / core); `commands.zig` is
+  the re-export façade
 - `src/ui/` — terminal display, diff renderer, help screen
 
 Plus `src/tz.zig` (pure TzInfo + probe parser) and `src/tz_probe.zig` (the
-ssh-side TZ probe + per-run cache).
+ssh-side TZ probe + per-run cache). See [CLAUDE.md](CLAUDE.md) for the full
+per-file map and the architectural invariants the codebase preserves.
 
-The schedule parser, both next-run calculators (DST-correct via libc
-`localtime_r`/`mktime` for controller-zone; fixed-offset via `gmtime_r`/`timegm`
-for target-zone), the Vixie DOM/DOW OR-rule, and the timezone probe parser
-are all covered by inline unit tests colocated with each module. Run them with:
+Inline unit tests are colocated with each module (the schedule parser, both
+next-run calculators, the Vixie DOM/DOW OR-rule, the timezone probe parser,
+the CLI flag validation, the marker round-trips, the runs store, etc.). Run
+them with:
 
 ```sh
-make test                # zig build test
+make test                # zig build test — 300+ inline tests
 make itest               # end-to-end script against /tmp/looper-itest-$$
 ```
 
+The v0.1 acceptance script exercises the full agent-loop contract — install,
+own, run, observe — end-to-end:
+
+```sh
+bash scripts/acceptance-v0.1.sh
+```
+
+Each subsequent milestone has its own acceptance script (`acceptance-v0.2.sh`
+through `acceptance-v0.7.sh`) that defines what "done" looks like for that
+milestone, executable.
+
 ## Status & roadmap
 
-Looper is in active development. The shipped surface above is stable and
-covers the human-CLI use case — managing cron on one box or a fleet, with
-deferred one-shots and durable output capture layered on top.
+Looper is in active development. The shipped surface above covers the human-CLI
+use case (managing cron on one box or a fleet, with deferred one-shots and
+durable output capture) **plus the v0.1 agent-loop milestone** — wrap-by-default
+execution, provenance per job, JSON-first output with stable `schema_version`,
+and the `history`/`last` read side of the feedback loop. An agent can install a
+job, claim it via `--as`, fire it manually with `looper run`, and read what it
+produced — all through stable JSON. The contract is captured executably in
+[`scripts/acceptance-v0.1.sh`](scripts/acceptance-v0.1.sh) and the JSON shapes
+in [`docs/JSON_SCHEMA.md`](docs/JSON_SCHEMA.md).
 
-The next arc reframes looper as a **primitive that agent automations reach
-for** when they need to install, observe, and own recurring or one-shot
-jobs across one host or many. The agent loop closes when an agent can
-install a job, talk to looper in stable JSON, distinguish its own work
-from other agents', and read whether its job ran.
-
-See [ROADMAP.md](ROADMAP.md) for the v0.1–v0.7 milestone breakdown.
-Live status: [GitHub milestones](https://github.com/AnthemFlynn/looper/milestones).
+Next milestones (v0.2–v0.7) layer in declarative `apply`, parallel ssh fan-out,
+drift detection, end-to-end verification, push subscriptions, structured run
+queries, Prometheus metrics, hooks, audit logging, catchup, per-owner quotas,
+ergonomics (`tui`, completions), and an MCP server surface. See
+[ROADMAP.md](ROADMAP.md) for the full breakdown. Live status:
+[GitHub milestones](https://github.com/AnthemFlynn/looper/milestones).
 
 This direction does not widen looper's scope. Looper stays a cron
 management tool — never a scheduler, never a daemon, never a workflow

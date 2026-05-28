@@ -11,8 +11,17 @@ const help_mod = @import("ui/help.zig");
 const colors = @import("ui/colors.zig");
 const target_mod = @import("crontab/target.zig");
 const tz_mod = @import("tz.zig");
+const lock_mod = @import("lock.zig");
 
-const Cmd = enum { ls, add, edit, rm, enable, disable, show, run, explain, import, backup, backups, restore, doctor, once, runs, exec, version, help, unknown };
+// Adding a new verb? Three places to update in lock-step:
+//   1. This enum
+//   2. `parseCmd`'s string→Cmd map (below)
+//   3. `isMutating` if the verb writes the crontab — the lock dispatch
+//      relies on it being correctly classified or concurrent writers
+//      will silently race.
+// A future refactor could collapse (1)+(2)+(3) into a single comptime
+// table; deferred until the third dimension forces the issue.
+const Cmd = enum { ls, add, edit, rm, enable, disable, show, run, explain, import, backup, backups, restore, doctor, once, runs, exec, history, last, apply, plan, version, help, unknown };
 
 fn parseCmd(s: []const u8) Cmd {
     // Note: `set` aliases `edit` (the partial-update command), not `add`.
@@ -37,10 +46,25 @@ fn parseCmd(s: []const u8) Cmd {
         .{ "enable", Cmd.enable },   .{ "disable", Cmd.disable }, .{ "show", Cmd.show },       .{ "run", Cmd.run },
         .{ "explain", Cmd.explain }, .{ "import", Cmd.import },   .{ "backup", Cmd.backup },   .{ "backups", Cmd.backups },
         .{ "restore", Cmd.restore }, .{ "doctor", Cmd.doctor },   .{ "once", Cmd.once },       .{ "runs", Cmd.runs },
+        .{ "history", Cmd.history }, .{ "last", Cmd.last },
+        .{ "apply", Cmd.apply },     .{ "plan", Cmd.plan },
         .{ "version", Cmd.version }, .{ "help", Cmd.help },
     };
     inline for (map) |e| if (std.mem.eql(u8, s, e[0])) return e[1];
     return .unknown;
+}
+
+/// Predicate used by the per-target loop to decide whether to acquire
+/// the cross-caller lock (v0.2 #8). Read-only verbs don't take it —
+/// serializing concurrent readers would be a regression for no benefit.
+/// `plan` is dry-run by definition, so it's read-only too; `apply` /
+/// `add` / `edit` / `rm` / `enable` / `disable` / `restore` / `import` /
+/// `backup` / `backups prune` all rewrite the crontab and need it.
+fn isMutating(cmd: Cmd) bool {
+    return switch (cmd) {
+        .add, .edit, .rm, .enable, .disable, .import, .backup, .backups, .restore, .apply => true,
+        else => false,
+    };
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
@@ -51,13 +75,32 @@ pub fn main(init: std.process.Init.Minimal) !void {
     ctx.color = c.isatty(1) != 0 and posix.getenv("NO_COLOR") == null;
 
     const argv = try init.args.toSlice(a);
-    const parsed = try cli.parseArgv(a, argv, &ctx);
+    var parsed = try cli.parseArgv(a, argv, &ctx);
     if (parsed.bad_option) |bad| {
         posix.eprint("looper: unknown option '{s}' (try: looper help)\n", .{bad});
         ctx.fail(2);
         ctx.flush();
         std.process.exit(ctx.exit_code);
     }
+    // `--as` flag wins; otherwise fall back to LOOPER_AS env. Agents
+    // typically export the env once and use the flag only for ad-hoc
+    // overrides. Validated through the same predicate so an env value
+    // with whitespace can't smuggle invalid bytes into the marker.
+    if (parsed.as == null) {
+        if (posix.getenv("LOOPER_AS")) |v| {
+            if (!cli.isValidPrincipal(v)) {
+                posix.eprint("looper: LOOPER_AS='{s}' contains whitespace, '=', or unprintable bytes — refusing to use as a principal\n", .{v});
+                ctx.fail(2);
+                ctx.flush();
+                std.process.exit(ctx.exit_code);
+            }
+            parsed.as = v;
+        }
+    }
+    // JSON-first: piped stdout (non-TTY) auto-enables --json so agents
+    // never have to remember the flag. Explicit `--json` on the CLI has
+    // already set ctx.json above; TTY callers see the human format.
+    if (!ctx.json and c.isatty(1) == 0) ctx.json = true;
 
     if (parsed.force_help or parsed.positionals.len == 0) {
         help_mod.printHelp(&ctx);
@@ -138,11 +181,18 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // removes the source job. Local-target by definition since cron
     // fires the local user's crontab. The positional argv after `--`
     // is the user's command — passed through verbatim.
+    //
+    // `--owner` is overloaded here vs. the filter semantics in
+    // ls/runs ls: in the _exec context it carries the source job's
+    // `created_by` forward from the wrapper line so the resulting
+    // run record can be queried by `runs ls --owner`. The commands
+    // are disjoint so the reuse is unambiguous in practice.
     if (cmd == .exec) {
-        try cmds.cmdExec(
+        try cmds.cmdExecWithOwner(
             &ctx,
             parsed.run_id orelse "",
             parsed.source_id,
+            parsed.owner,
             parsed.timeout_secs,
             parsed.target_label,
             parsed.once_flag,
@@ -185,6 +235,22 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
 
+    // `history <id>` and `last <id>` query run records under
+    // state_dir/runs/, filtered by source_id. Local-only by definition
+    // — there's no remote analog because state_dir is per-machine.
+    if (cmd == .history or cmd == .last) {
+        if (rest.len < 1) {
+            posix.eprint("looper: {s} needs an id (try: looper ls)\n", .{parsed.positionals[0]});
+            ctx.fail(2);
+            ctx.flush();
+            std.process.exit(ctx.exit_code);
+        }
+        if (cmd == .history) try cmds.cmdHistory(&ctx, rest[0]) else try cmds.cmdLast(&ctx, rest[0]);
+        ctx.flush();
+        if (ctx.exit_code != 0) std.process.exit(ctx.exit_code);
+        return;
+    }
+
     // `runs ls | show <id> | prune` queries / manages the local run
     // records under state_dir/runs/. No target iteration — state_dir
     // is per-machine.
@@ -204,6 +270,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             const content = target_mod.readCrontab(a, local) catch "";
             var filter: cmds.RunsFilter = .{};
             if (parsed.status_filter) |s| filter.status = cmds.parseRunsStatusFilter(s);
+            if (parsed.owner) |o| filter.owner = o;
             try cmds.cmdRunsLs(&ctx, content, filter);
         } else if (std.mem.eql(u8, sub, "show")) {
             if (rest.len < 2) {
@@ -231,8 +298,28 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // in JSON mode — they break parsability. Each JSON document carries
     // its own `target` field for disambiguation.
     const visual_multi = multi and !ctx.json;
+    // Per-target concurrency knob (v0.2 #4). The flag is accepted for
+    // forward compatibility but v0.2's dispatch loop is sequential —
+    // the acceptance contract is deterministic per-target ordering,
+    // which sequential trivially satisfies. When the operator asked
+    // for real parallelism (`-j N` with N > 1), emit a one-line stderr
+    // hint so they aren't misled about what shipped. `--quiet`
+    // suppresses the hint, matching the convention used by
+    // `--check-command` (commands/mutate.zig:72).
+    if (parsed.jobs) |n| {
+        if (n > 1 and !ctx.quiet) {
+            posix.eprint("looper: -j {d} accepted but v0.2 fan-out is sequential (bounded worker pool lands in v0.3)\n", .{n});
+        }
+    }
     for (targets) |t| {
         if (visual_multi) ctx.emit("{s}{s}=== {s} ==={s}\n", .{ ctx.k(colors.BOLD), ctx.k(colors.BLUE), t.label(a), ctx.k(colors.RESET) });
+        // Cross-caller lock (v0.2 #8): only held around mutating
+        // commands. Read-only verbs (ls/show/explain) don't need it
+        // and acquiring would serialize concurrent readers for no
+        // benefit. The lock is taken BEFORE the crontab read so the
+        // read-modify-write window is fully covered.
+        var lock = if (isMutating(cmd)) lock_mod.acquire(a, t) else lock_mod.Lock{};
+        defer lock.release();
         // For remote targets, the same ssh round-trip also fetches the
         // target's TZ (sentinel-split). Local/file return tz=null and we
         // resolve controller TZ here.
@@ -248,7 +335,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         // user is never misled.
         if (rr.tz == null and t.kind == .remote) tz.source = .controller_fallback;
         switch (cmd) {
-            .ls => try cmds.cmdLs(&ctx, t, content, tz),
+            .ls => try cmds.cmdLs(&ctx, t, content, tz, .{ .owner = parsed.owner }),
             .add => {
                 if (rest.len < 2) {
                     posix.eprint("looper: add needs <schedule> <command>\n", .{});
@@ -258,6 +345,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 try cmds.cmdAdd(&ctx, t, content, rest[0], rest[1], parsed.want_id, .{
                     .check_command = parsed.check_command,
                     .capture = parsed.capture,
+                    .no_wrap = parsed.no_wrap,
+                    .as = parsed.as,
                 });
             },
             .edit => {
@@ -272,7 +361,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                     ctx.fail(2);
                     break;
                 }
-                try cmds.cmdEdit(&ctx, t, content, rest[0], parsed.new_schedule, parsed.new_command);
+                try cmds.cmdEdit(&ctx, t, content, rest[0], parsed.new_schedule, parsed.new_command, .{ .as = parsed.as });
             },
             .rm => {
                 if (rest.len < 1) {
@@ -323,6 +412,24 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 }
             },
             .restore => try cmds.cmdRestore(&ctx, t, content, if (rest.len > 0) rest[0] else null, parsed.from_stamp),
+            .apply => {
+                if (rest.len < 1) {
+                    posix.eprint("looper: apply needs <spec.toml>\n", .{});
+                    posix.eprint("  example: looper -f /tmp/c apply jobs.toml\n", .{});
+                    ctx.fail(2);
+                    break;
+                }
+                try cmds.cmdApply(&ctx, t, content, rest[0], .{ .as = parsed.as });
+            },
+            .plan => {
+                if (rest.len < 1) {
+                    posix.eprint("looper: plan needs <spec.toml>\n", .{});
+                    posix.eprint("  example: looper -f /tmp/c plan jobs.toml\n", .{});
+                    ctx.fail(2);
+                    break;
+                }
+                try cmds.cmdPlan(&ctx, t, content, rest[0], .{ .as = parsed.as });
+            },
             else => {},
         }
         if (visual_multi) ctx.emit("\n", .{});
@@ -355,4 +462,6 @@ test {
     _ = @import("ui/diff.zig");
     _ = @import("ui/help.zig");
     _ = @import("ui/colors.zig");
+    _ = @import("spec.zig");
+    _ = @import("lock.zig");
 }

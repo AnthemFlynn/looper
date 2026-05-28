@@ -39,6 +39,14 @@ pub const Job = struct {
     /// shell PATH change would have broken bare-name lookup. Null for
     /// non-wrapped jobs.
     wrapper_bin: ?[]const u8 = null,
+    /// Provenance: the principal (--as / LOOPER_AS) that originally
+    /// created this job. Null for jobs written by a pre-provenance
+    /// looper or hand-edited markers. Stable across edits — only
+    /// `last_modified_by` changes.
+    created_by: ?[]const u8 = null,
+    created_at: ?i64 = null,
+    last_modified_by: ?[]const u8 = null,
+    last_modified_at: ?i64 = null,
 };
 
 pub const Item = union(enum) {
@@ -127,6 +135,12 @@ pub const Marker = struct {
     /// Looper-binary path embedded at write time. The cron payload is
     /// synthesized from this + marker flags at serialize time.
     wrapper_bin: ?[]const u8 = null,
+    /// Provenance (see Job.created_by). Stored as marker attributes so
+    /// ownership survives serialize/parse round-trips.
+    created_by: ?[]const u8 = null,
+    created_at: ?i64 = null,
+    last_modified_by: ?[]const u8 = null,
+    last_modified_at: ?i64 = null,
 };
 
 pub fn parseMarker(a: std.mem.Allocator, line: []const u8) ?Marker {
@@ -138,6 +152,10 @@ pub fn parseMarker(a: std.mem.Allocator, line: []const u8) ?Marker {
     var run_id: ?[]const u8 = null;
     var timeout_secs: ?u32 = null;
     var wrapper_bin: ?[]const u8 = null;
+    var created_by: ?[]const u8 = null;
+    var created_at: ?i64 = null;
+    var last_modified_by: ?[]const u8 = null;
+    var last_modified_at: ?i64 = null;
     var it = std.mem.tokenizeAny(u8, line[MARKER.len..], " \t");
     while (it.next()) |tok| {
         if (std.mem.startsWith(u8, tok, "id=")) id = a.dupe(u8, tok[3..]) catch tok[3..];
@@ -147,6 +165,10 @@ pub fn parseMarker(a: std.mem.Allocator, line: []const u8) ?Marker {
         if (std.mem.startsWith(u8, tok, "run_id=")) run_id = a.dupe(u8, tok[7..]) catch tok[7..];
         if (std.mem.startsWith(u8, tok, "timeout_secs=")) timeout_secs = std.fmt.parseInt(u32, tok[13..], 10) catch null;
         if (std.mem.startsWith(u8, tok, "wrapper_bin=")) wrapper_bin = a.dupe(u8, tok[12..]) catch tok[12..];
+        if (std.mem.startsWith(u8, tok, "created_by=")) created_by = a.dupe(u8, tok[11..]) catch tok[11..];
+        if (std.mem.startsWith(u8, tok, "created_at=")) created_at = std.fmt.parseInt(i64, tok[11..], 10) catch null;
+        if (std.mem.startsWith(u8, tok, "last_modified_by=")) last_modified_by = a.dupe(u8, tok[17..]) catch tok[17..];
+        if (std.mem.startsWith(u8, tok, "last_modified_at=")) last_modified_at = std.fmt.parseInt(i64, tok[17..], 10) catch null;
     }
     if (id.len == 0) return null;
     return .{
@@ -157,6 +179,10 @@ pub fn parseMarker(a: std.mem.Allocator, line: []const u8) ?Marker {
         .run_id = run_id,
         .timeout_secs = timeout_secs,
         .wrapper_bin = wrapper_bin,
+        .created_by = created_by,
+        .created_at = created_at,
+        .last_modified_by = last_modified_by,
+        .last_modified_at = last_modified_at,
     };
 }
 
@@ -243,6 +269,16 @@ pub fn wrapCommand(a: std.mem.Allocator, j: Job) ![]u8 {
         const s = try std.fmt.allocPrint(a, " --timeout-secs={d}", .{t});
         try out.appendSlice(a, s);
     }
+    // Carry ownership forward to the cron-fired _exec call. Without
+    // this, `runs ls --owner` is dead for the cron path because the
+    // resulting run record has no `created_by`. Principal values are
+    // validated whitespace-free at CLI ingress (see cli.isValidPrincipal),
+    // so a bare `--owner=<v>` token round-trips through cron's shell
+    // tokenizer safely.
+    if (j.created_by) |cb| {
+        try out.appendSlice(a, " --owner=");
+        try out.appendSlice(a, cb);
+    }
     try out.appendSlice(a, WRAPPER_INNER_SENTINEL);
     const quoted = posix.shellQuote(a, j.command);
     try out.appendSlice(a, quoted);
@@ -280,6 +316,10 @@ pub fn serializeMarker(a: std.mem.Allocator, m: Marker) ![]u8 {
     if (m.run_id) |rid| ctx_mod.aw(a, &out, " run_id={s}", .{rid});
     if (m.timeout_secs) |t| ctx_mod.aw(a, &out, " timeout_secs={d}", .{t});
     if (m.wrapper_bin) |wb| ctx_mod.aw(a, &out, " wrapper_bin={s}", .{wb});
+    if (m.created_by) |cb| ctx_mod.aw(a, &out, " created_by={s}", .{cb});
+    if (m.created_at) |ca| ctx_mod.aw(a, &out, " created_at={d}", .{ca});
+    if (m.last_modified_by) |lb| ctx_mod.aw(a, &out, " last_modified_by={s}", .{lb});
+    if (m.last_modified_at) |la| ctx_mod.aw(a, &out, " last_modified_at={d}", .{la});
     return out.toOwnedSlice(a);
 }
 
@@ -318,6 +358,10 @@ pub fn parseCrontab(a: std.mem.Allocator, text: []const u8) !Crontab {
                     .run_id = pm.run_id,
                     .timeout_secs = pm.timeout_secs,
                     .wrapper_bin = pm.wrapper_bin,
+                    .created_by = pm.created_by,
+                    .created_at = pm.created_at,
+                    .last_modified_by = pm.last_modified_by,
+                    .last_modified_at = pm.last_modified_at,
                 } });
             } else {
                 try ct.items.append(a, .{ .raw = try serializeMarker(a, pm) });
@@ -366,6 +410,10 @@ pub fn serialize(a: std.mem.Allocator, ct: *Crontab) ![]u8 {
                     .run_id = j.run_id,
                     .timeout_secs = j.timeout_secs,
                     .wrapper_bin = j.wrapper_bin,
+                    .created_by = j.created_by,
+                    .created_at = j.created_at,
+                    .last_modified_by = j.last_modified_by,
+                    .last_modified_at = j.last_modified_at,
                 });
                 try out.appendSlice(a, marker_line);
                 try out.append(a, '\n');
@@ -795,6 +843,87 @@ test "wrapCommand + tryUnwrapInner round-trip with % chars" {
         const back = tryUnwrapInner(a, wrapped).?;
         try testing.expectEqualStrings(inner, back);
     }
+}
+
+test "parseMarker round-trips the four provenance fields" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const m = parseMarker(
+        arena.allocator(),
+        "#looper# id=x enabled=1 created_by=agent-a created_at=1700000000 last_modified_by=agent-b last_modified_at=1700000500",
+    ).?;
+    try testing.expectEqualStrings("agent-a", m.created_by.?);
+    try testing.expectEqual(@as(?i64, 1700000000), m.created_at);
+    try testing.expectEqualStrings("agent-b", m.last_modified_by.?);
+    try testing.expectEqual(@as(?i64, 1700000500), m.last_modified_at);
+}
+
+test "serializeMarker omits provenance fields when unset (legacy byte-stability)" {
+    // Forward-compat: a job without provenance must serialize to the
+    // exact bytes a pre-provenance looper would have written. Otherwise
+    // every existing crontab on every host changes shape on first read,
+    // even if no agent has touched the job.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const out = try serializeMarker(arena.allocator(), .{ .id = "legacy", .enabled = true });
+    try testing.expectEqualStrings("#looper# id=legacy enabled=1", out);
+}
+
+test "serializeMarker emits provenance fields when set" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const out = try serializeMarker(arena.allocator(), .{
+        .id = "x",
+        .enabled = true,
+        .created_by = "agent-a",
+        .created_at = 1700000000,
+        .last_modified_by = "agent-b",
+        .last_modified_at = 1700000500,
+    });
+    try testing.expectEqualStrings(
+        "#looper# id=x enabled=1 created_by=agent-a created_at=1700000000 last_modified_by=agent-b last_modified_at=1700000500",
+        out,
+    );
+}
+
+test "wrapCommand emits --owner=<v> when created_by is set" {
+    // Carries provenance forward into the cron-fired _exec call so
+    // `runs ls --owner` works for cron-fired runs (HIGH#2 fix).
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const out = try wrapCommand(a, .{
+        .id = "rec",
+        .enabled = true,
+        .schedule = "@daily",
+        .command = "echo hi",
+        .capture = true,
+        .wrapper_bin = "/usr/local/bin/looper",
+        .created_by = "agent-a",
+    });
+    try testing.expect(std.mem.indexOf(u8, out, " --owner=agent-a") != null);
+    // Sanity-check positioning: --owner must precede the inner sentinel
+    // so cron's shell tokenizer treats it as a wrapper flag.
+    const owner_pos = std.mem.indexOf(u8, out, "--owner=agent-a").?;
+    const sentinel_pos = std.mem.indexOf(u8, out, " -- /bin/sh -c ").?;
+    try testing.expect(owner_pos < sentinel_pos);
+}
+
+test "wrapCommand omits --owner when created_by is null (regression guard)" {
+    // Existing roundtrip tests assume bare wrapper lines for jobs
+    // without provenance — pin the no-emit branch.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const out = try wrapCommand(a, .{
+        .id = "rec",
+        .enabled = true,
+        .schedule = "@daily",
+        .command = "echo hi",
+        .capture = true,
+        .wrapper_bin = "/usr/local/bin/looper",
+    });
+    try testing.expect(std.mem.indexOf(u8, out, "--owner=") == null);
 }
 
 test "wrapCommand fails when wrapper_bin is null" {

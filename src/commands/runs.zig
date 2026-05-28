@@ -26,7 +26,15 @@ const RunStatus = runs_mod.RunStatus;
 pub const Filter = struct {
     /// When set, only records matching this status appear in output.
     status: ?RunStatus = null,
+    /// `--owner <principal>`: only records whose `created_by` matches.
+    /// Records without `created_by` never match a non-null owner filter.
+    owner: ?[]const u8 = null,
 };
+
+/// JSON envelope version for runs output. See view.SCHEMA_VERSION for
+/// the rationale — kept in lockstep so consumers can rely on the same
+/// version across all looper JSON surfaces.
+const SCHEMA_VERSION: u32 = 1;
 
 /// Default cap for inline stdout/stderr in `runs show`. The captured
 /// files can be arbitrarily large; spilling all of it into the response
@@ -123,6 +131,10 @@ pub fn cmdRunsLs(ctx: *Ctx, crontab_content: []const u8, filter: Filter) !void {
         if (filter.status) |want| {
             if (runs_mod.statusOf(r) != want) continue;
         }
+        if (filter.owner) |want_owner| {
+            const got = r.created_by orelse continue;
+            if (!std.mem.eql(u8, got, want_owner)) continue;
+        }
         try filtered.append(ctx.a, r);
     }
 
@@ -176,12 +188,12 @@ fn humanWhen(a: std.mem.Allocator, r: RunRecord, now: i64) []const u8 {
 }
 
 fn cmdRunsLsJson(ctx: *Ctx, records: []const RunRecord) !void {
-    ctx.emit("[", .{});
+    ctx.emit("{{\"schema_version\":{d},\"runs\":[", .{SCHEMA_VERSION});
     for (records, 0..) |r, i| {
         if (i > 0) ctx.emit(",", .{});
         emitRecordJson(ctx, r);
     }
-    ctx.emit("]\n", .{});
+    ctx.emit("]}}\n", .{});
 }
 
 fn emitRecordJson(ctx: *Ctx, r: RunRecord) void {
@@ -199,7 +211,9 @@ fn emitRecordJson(ctx: *Ctx, r: RunRecord) void {
     emitOptInt(ctx, "started_at", r.started_at);
     emitOptInt(ctx, "finished_at", r.finished_at);
     if (r.exit_code) |code| ctx.emit(",\"exit_code\":{d}", .{code}) else ctx.emit(",\"exit_code\":null", .{});
-    ctx.emit(",\"timed_out\":{s}}}", .{if (r.timed_out) "true" else "false"});
+    ctx.emit(",\"timed_out\":{s}", .{if (r.timed_out) "true" else "false"});
+    if (r.created_by) |cb| ctx.emit(",\"created_by\":\"{s}\"", .{display.jsonEsc(ctx.a, cb)}) else ctx.emit(",\"created_by\":null", .{});
+    ctx.emit("}}", .{});
 }
 
 fn emitOptInt(ctx: *Ctx, key: []const u8, v: ?i64) void {
@@ -282,8 +296,8 @@ fn emitRecordJsonShow(
     stderr_total: usize,
 ) void {
     const status = runs_mod.statusOf(r);
-    ctx.emit("{{\"run_id\":\"{s}\",\"status\":\"{s}\",", .{
-        display.jsonEsc(ctx.a, r.run_id), statusStr(status),
+    ctx.emit("{{\"schema_version\":{d},\"run_id\":\"{s}\",\"status\":\"{s}\",", .{
+        SCHEMA_VERSION, display.jsonEsc(ctx.a, r.run_id), statusStr(status),
     });
     ctx.emit("\"source_id\":", .{});
     if (r.source_id) |sid| ctx.emit("\"{s}\"", .{display.jsonEsc(ctx.a, sid)}) else ctx.emit("null", .{});
@@ -296,11 +310,17 @@ fn emitRecordJsonShow(
     emitOptInt(ctx, "finished_at", r.finished_at);
     if (r.exit_code) |code| ctx.emit(",\"exit_code\":{d}", .{code}) else ctx.emit(",\"exit_code\":null", .{});
     ctx.emit(",\"timed_out\":{s}", .{if (r.timed_out) "true" else "false"});
-    ctx.emit(",\"stdout\":\"{s}\",\"stdout_total_bytes\":{d},\"stdout_truncated\":{s}", .{
+    if (r.created_by) |cb| ctx.emit(",\"created_by\":\"{s}\"", .{display.jsonEsc(ctx.a, cb)}) else ctx.emit(",\"created_by\":null", .{});
+    // `captured` nests the stdout/stderr blobs so consumers can detect
+    // "have captured output" with `.captured` rather than probing for
+    // both `stdout` and `stderr` separately. Field shape inside is
+    // stable across `runs show` and any future surface that exposes
+    // captured-process output (e.g., `history --include-captured`).
+    ctx.emit(",\"captured\":{{\"stdout\":\"{s}\",\"stdout_total_bytes\":{d},\"stdout_truncated\":{s}", .{
         display.jsonEsc(ctx.a, stdout_bytes), stdout_total,
         if (stdout_truncated) "true" else "false",
     });
-    ctx.emit(",\"stderr\":\"{s}\",\"stderr_total_bytes\":{d},\"stderr_truncated\":{s}}}\n", .{
+    ctx.emit(",\"stderr\":\"{s}\",\"stderr_total_bytes\":{d},\"stderr_truncated\":{s}}}}}\n", .{
         display.jsonEsc(ctx.a, stderr_bytes), stderr_total,
         if (stderr_truncated) "true" else "false",
     });
@@ -399,19 +419,17 @@ test "parseStatusFilter recognizes all four status names" {
     try testing.expectEqual(@as(?RunStatus, null), parseStatusFilter("nonsense"));
 }
 
-test "cmdRunsLs --json on empty state emits []" {
+test "cmdRunsLs --json emits the schema_version envelope" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var ctx = newCtx(a);
     ctx.json = true;
-    // Empty crontab content + likely-empty real runs dir (we don't
-    // create anything). Output should be a clean JSON array.
+    // We can't assume the runs dir is empty (other tests may have run
+    // first), so just verify the envelope shape — `{"schema_version":1,"runs":[...`
     try cmdRunsLs(&ctx, "", .{});
-    // Either "[]" or "[<existing records from other tests>]" — we can't
-    // assume the runs dir is empty (other tests may have run first), so
-    // just verify the shape.
-    try testing.expect(ctx.buf.items[0] == '[');
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"schema_version\":1") != null);
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"runs\":[") != null);
 }
 
 test "cmdRunsLs synthesizes pending records from crontab one-shots" {
@@ -430,6 +448,88 @@ test "cmdRunsLs synthesizes pending records from crontab one-shots" {
     // and a run_id matching the marker's.
     try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"run_id\":\"pending-xyz-1\"") != null);
     try testing.expect(std.mem.indexOf(u8, ctx.buf.items, "\"status\":\"pending\"") != null);
+}
+
+test "cmdRunsLs --owner filter excludes records with mismatched created_by" {
+    // Seed a record with created_by=agent-a, then query with
+    // --owner=other and expect it absent.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const run_id = try std.fmt.allocPrint(a, "filter-mismatch-{x}", .{posix.nowEpoch()});
+    try runs_mod.metaWrite(a, .{
+        .run_id = run_id,
+        .command = "/bin/true",
+        .scheduled_for = 1748016000,
+        .started_at = 1748016001,
+        .finished_at = 1748016002,
+        .exit_code = 0,
+        .created_by = "agent-a",
+    });
+    defer {
+        const meta_z = a.dupeZ(u8, runs_mod.metaPath(a, run_id)) catch unreachable;
+        const dir_z = a.dupeZ(u8, runs_mod.runDir(a, run_id)) catch unreachable;
+        _ = posix.c.unlink(meta_z.ptr);
+        _ = posix.c.rmdir(dir_z.ptr);
+    }
+    var ctx = newCtx(a);
+    ctx.json = true;
+    try cmdRunsLs(&ctx, "", .{ .owner = "other" });
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, run_id) == null);
+}
+
+test "cmdRunsLs --owner filter excludes records with null created_by" {
+    // A record without created_by (legacy / non-provenance run) must
+    // never match a non-null owner filter — otherwise unattributed
+    // records leak into ownership-scoped queries.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const run_id = try std.fmt.allocPrint(a, "filter-null-{x}", .{posix.nowEpoch()});
+    try runs_mod.metaWrite(a, .{
+        .run_id = run_id,
+        .command = "/bin/true",
+        .scheduled_for = 1748016000,
+        .started_at = 1748016001,
+        .finished_at = 1748016002,
+        .exit_code = 0,
+    });
+    defer {
+        const meta_z = a.dupeZ(u8, runs_mod.metaPath(a, run_id)) catch unreachable;
+        const dir_z = a.dupeZ(u8, runs_mod.runDir(a, run_id)) catch unreachable;
+        _ = posix.c.unlink(meta_z.ptr);
+        _ = posix.c.rmdir(dir_z.ptr);
+    }
+    var ctx = newCtx(a);
+    ctx.json = true;
+    try cmdRunsLs(&ctx, "", .{ .owner = "agent-a" });
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, run_id) == null);
+}
+
+test "cmdRunsLs --owner filter includes records with matching created_by" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const run_id = try std.fmt.allocPrint(a, "filter-match-{x}", .{posix.nowEpoch()});
+    try runs_mod.metaWrite(a, .{
+        .run_id = run_id,
+        .command = "/bin/true",
+        .scheduled_for = 1748016000,
+        .started_at = 1748016001,
+        .finished_at = 1748016002,
+        .exit_code = 0,
+        .created_by = "agent-a",
+    });
+    defer {
+        const meta_z = a.dupeZ(u8, runs_mod.metaPath(a, run_id)) catch unreachable;
+        const dir_z = a.dupeZ(u8, runs_mod.runDir(a, run_id)) catch unreachable;
+        _ = posix.c.unlink(meta_z.ptr);
+        _ = posix.c.rmdir(dir_z.ptr);
+    }
+    var ctx = newCtx(a);
+    ctx.json = true;
+    try cmdRunsLs(&ctx, "", .{ .owner = "agent-a" });
+    try testing.expect(std.mem.indexOf(u8, ctx.buf.items, run_id) != null);
 }
 
 test "cmdRunsLs filter status=pending excludes done/failed records" {

@@ -62,43 +62,53 @@ scheduler, a daemon, or a workflow engine.
 
 ## Milestones
 
-### v0.1 agent loop closes
+### v0.1 agent loop closes — **SHIPPED**
 
-The minimum looper needs to be usable as an automation primitive. Without
-all four issues here, agentic loops cannot safely close because the agent
-has no way to install, own, observe, or coordinate.
+The minimum looper needed to be usable as an automation primitive. All four
+issues are landed and the contract is captured executably in
+[`scripts/acceptance-v0.1.sh`](scripts/acceptance-v0.1.sh) (exit 0 == shippable).
 
-- [#3](https://github.com/AnthemFlynn/looper/issues/3) — wrap-by-default
-  execution. The current `--capture` semantics promoted from opt-in to
-  default; `--no-wrap` is the escape hatch. Silent failure and silent
-  overlap become detectable by default.
-- [#5](https://github.com/AnthemFlynn/looper/issues/5) — JSON-first output
-  and stable schema versioning. Auto-JSON when non-TTY; `schema_version`
-  in every document; documented contract in `docs/JSON_SCHEMA.md`.
-- [#6](https://github.com/AnthemFlynn/looper/issues/6) — provenance
+- [x] [#3](https://github.com/AnthemFlynn/looper/issues/3) — wrap-by-default
+  execution. The former `--capture` semantics are now the default; `--no-wrap`
+  is the escape hatch. The `_exec` wrapper line carries `--owner=<created_by>`
+  so cron-fired runs stamp provenance on the run record. Silent failure and
+  silent overlap are detectable by default.
+- [x] [#5](https://github.com/AnthemFlynn/looper/issues/5) — JSON-first output
+  and stable schema versioning. Stdout auto-enables JSON on non-TTY;
+  `schema_version: 1` rides every document; envelope shapes
+  (`{schema_version, jobs}`, `{schema_version, runs}`, `{schema_version, id, runs}`)
+  keep additions non-breaking. Full contract in
+  [`docs/JSON_SCHEMA.md`](docs/JSON_SCHEMA.md).
+- [x] [#6](https://github.com/AnthemFlynn/looper/issues/6) — provenance
   metadata (`created_by`, `created_at`, `last_modified_by`,
-  `last_modified_at`) on every managed job. `--as` / `LOOPER_AS` lets
-  agents identify themselves; ownership filters prevent cross-agent
-  damage.
-- [#1](https://github.com/AnthemFlynn/looper/issues/1) — `looper history
-  <id>` / `last` / `tail`. Reads wrap run logs first, falls back to
-  syslog / journalctl. The agent's read side of the feedback loop.
+  `last_modified_at`) round-trips through the marker, propagates into run
+  records, and is queryable via `ls --owner` / `runs ls --owner`. `--as`
+  flag + `LOOPER_AS` env let agents identify themselves; CLI ingress
+  validates principal values to keep the marker tokenizer safe.
+- [x] [#1](https://github.com/AnthemFlynn/looper/issues/1) — `looper history
+  <id>` and `looper last <id>` read the run-record store filtered by
+  source_id. The runs store is the single source of truth in v0.1; a future
+  cycle can layer syslog/journalctl fallback on top if needed.
 
-**v0.1 success criterion.** An agent can install a recurring task, find out
-when it ran, and read what it produced — all via `looper` CLI calls returning
-stable JSON. Concretely:
+**v0.1 success criterion (verified).** An agent can install a recurring task,
+find out when it ran, and read what it produced — all via `looper` CLI calls
+returning stable JSON. Concretely:
 
 ```sh
-looper add --as agent-a --capture "@hourly" "my-script.sh"
+looper add --as agent-a --id daily-report "@hourly" "my-script.sh"
 # ... time passes ...
-looper runs ls --owner agent-a --json | jq '.[0]'
-# { "run_id": "...", "source_id": "...", "exit_code": 0, "duration_ms": 1234, ... }
-looper runs show <run_id> --json | jq '.captured.stdout'
+looper runs ls --owner agent-a | jq '.runs[0]'
+# { "run_id": "daily-report-<epoch>-<pid>-<n>", "source_id": "daily-report",
+#   "exit_code": 0, "created_by": "agent-a", ... }
+looper runs show <run_id> | jq '.captured.stdout'
 # "..."
+looper history daily-report | jq '.runs[0].exit_code'
+# 0
+looper last daily-report | jq '.exit_code'
+# 0
 ```
 
-If this flow works end-to-end with stable schemas, provenance filtering, and
-wrap-by-default capture — v0.1 is done.
+All four assertions pass against the real binary; v0.1 is done.
 
 ### v0.2 deployable
 
