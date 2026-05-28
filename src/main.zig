@@ -21,7 +21,7 @@ const lock_mod = @import("lock.zig");
 //      will silently race.
 // A future refactor could collapse (1)+(2)+(3) into a single comptime
 // table; deferred until the third dimension forces the issue.
-const Cmd = enum { ls, add, edit, rm, enable, disable, show, run, explain, import, backup, backups, restore, doctor, once, runs, exec, history, last, apply, plan, agenda, version, help, unknown };
+const Cmd = enum { ls, add, edit, rm, enable, disable, show, run, explain, import, backup, backups, restore, doctor, once, runs, exec, history, last, apply, plan, agenda, diff, version, help, unknown };
 
 fn parseCmd(s: []const u8) Cmd {
     // Note: `set` aliases `edit` (the partial-update command), not `add`.
@@ -48,7 +48,7 @@ fn parseCmd(s: []const u8) Cmd {
         .{ "restore", Cmd.restore }, .{ "doctor", Cmd.doctor },   .{ "once", Cmd.once },       .{ "runs", Cmd.runs },
         .{ "history", Cmd.history }, .{ "last", Cmd.last },
         .{ "apply", Cmd.apply },     .{ "plan", Cmd.plan },
-        .{ "agenda", Cmd.agenda },
+        .{ "agenda", Cmd.agenda },   .{ "diff", Cmd.diff },
         .{ "version", Cmd.version }, .{ "help", Cmd.help },
     };
     inline for (map) |e| if (std.mem.eql(u8, s, e[0])) return e[1];
@@ -448,6 +448,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 }
                 try cmds.cmdPlan(&ctx, t, content, rest[0], .{ .as = parsed.as });
             },
+            // `diff` is read-only: report foreign (unmanaged) drift per
+            // target; cmdDiff calls ctx.fail(1) on drift so the process
+            // exit code is nonzero if any target has drifted.
+            .diff => try cmds.cmdDiff(&ctx, t, content),
             else => {},
         }
         if (visual_multi) ctx.emit("\n", .{});

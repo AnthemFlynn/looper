@@ -33,6 +33,7 @@ pub fn printHelp(ctx: *ctx_mod.Ctx) void {
     ctx.emit("  runs ls | show <id>       Inspect captured runs (one-shots + --capture jobs)\n", .{});
     ctx.emit("  runs prune --older-than   Remove run records older than the given seconds\n", .{});
     ctx.emit("  agenda [-n N] [--within D] Chronological 'what fires next' across targets\n", .{});
+    ctx.emit("  diff                      Detect drift: foreign cron lines looper doesn't manage\n", .{});
     ctx.emit("  help, version\n", .{});
     ctx.emit("\n", .{});
     ctx.emit("{s}TARGET{s} {s}(default: your own local crontab){s}\n", .{ B, R, D, R });
