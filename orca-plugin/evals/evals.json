@@ -60,6 +60,23 @@
         "Reply explains config is read from the primary checkout",
         "Reply warns tab commands don't wait for setup"
       ]
+    },
+    {
+      "id": 4,
+      "name": "flaky-mindset",
+      "prompt": "checkout.spec.ts > 'applies coupon' is flaky, fails about 1 in 5 CI runs. I've already tried adding waits and mocking the clock, neither fixed it. What should we do next?",
+      "expected_output": "Beyond generic debugging, the agent uses Orca's capabilities: read-only checks (session search, worktree ps / reference find for ownership), recognizes the race trigger (intermittent + 2 failed attempts), proposes a parallel race with a concrete brief and cost, and asks before launching any agent.",
+      "files": [],
+      "env": "mock CLI as in eval 1",
+      "assertions": [
+        "Ran read-only Orca discovery (search and/or worktree ps / reference find)",
+        "Launched no agents or worktrees without asking",
+        "Proposed racing/parallel agents or a second-agent review, citing why",
+        "States the cost (agent sessions/time/review load) of the proposal",
+        "Keeps the flake out of the current fix-auth-401 branch",
+        "Carries forward the user's card constraint"
+      ],
+      "iteration_2_observation": "with_skill: search --index-status, search 'applies coupon', worktree ps; proposed Claude+Codex race with brief, cost and single-agent fallback; asked first. without_skill: generic (good) debugging plan, offered a separate worktree, no Orca-native moves beyond that."
     }
   ],
   "mock_cli": "plugins/orca/skills/orca/scripts/mock_orca.py (symlink as orca-ide for eval 1)"

@@ -13,11 +13,12 @@ orca-plugin/
 └── plugins/orca/
     ├── .claude-plugin/plugin.json
     ├── skills/orca/
-    │   ├── SKILL.md                       # the hub: orient, API contract, mechanism picker, workflows, safety
+    │   ├── SKILL.md                       # the hub: Orca mindset, orient, API contract, mechanism picker, workflows, safety
     │   ├── scripts/orca.sh                # resolves the right CLI (orca / orca-ide / orca-dev / shim) and runs it
     │   ├── scripts/build_reference.py     # regenerates references/commands from `orca agent-context --json`
     │   ├── scripts/mock_orca.py           # fake CLI for dry-running Orca scripts without Orca installed
     │   └── references/
+    │       ├── operating-model.md         # when Orca changes the plan: triggers, anti-patterns, propose-vs-do
     │       ├── api-contract.md            # envelope, discovery, identity, receipts, errors, retries, hosts, paging
     │       ├── workflows.md               # 16 step-by-step recipes
     │       ├── orchestration.md           # router + cheat sheet for supervised multi-agent runs
@@ -45,10 +46,23 @@ or from a local clone: `/plugin marketplace add ./orca-plugin`, then `/plugin in
 `plugins/orca/skills/orca` into the agent's skills directory (for example `~/.agents/skills/orca`,
 `~/.codex/skills/orca`, or `~/.claude/skills/orca`). Orca's own Skills page scans those homes.
 
-This plugin works alongside Orca's official stubs (`npx skills add https://github.com/stablyai/orca
---skill orca-cli --skill orchestration`). They load the version-matched guide from your binary.
-This skill adds the agent-API contract, the workflow playbook, offline references and the slash
-commands, and it defers to `orca skills get` whenever the CLI is present.
+### How it relates to Orca's built-in skills
+
+It is designed to **layer on top of** Orca's own skills, not replace them. Install both:
+
+```bash
+orca skills install --skill orca-cli --skill orchestration    # or: npx skills add https://github.com/stablyai/orca --skill orca-cli --skill orchestration
+```
+
+| Layer | Provided by | Covers |
+| --- | --- | --- |
+| *What to do*: knowing when Orca changes the plan | this plugin (`references/operating-model.md`, SKILL.md §0) | when to race, hand off, get a second-agent review, verify in the browser, search past sessions; when not to; what to propose vs just do |
+| *How agents call Orca safely* | this plugin (`references/api-contract.md`) | JSON envelope, selectors, receipts, idempotent retries, error recovery, host scoping |
+| *Exactly which command and flags*, version-matched | Orca's `orca-cli` / `orchestration` skills (via `orca skills get`) | authoritative command rules for the installed build |
+| Workflows, offline references, slash commands, subagent, hook, mock CLI | this plugin | end-to-end recipes and tooling |
+
+When both trigger, the skill tells agents to use this one to decide *what* to do and Orca's for
+*exactly how*. If they ever disagree on a command detail, Orca's live guide wins.
 
 ## Slash commands
 

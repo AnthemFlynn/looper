@@ -44,6 +44,46 @@ orchestration (Experimental):  Run → Task → Dispatch (one authoritative atte
 
 Folder workspaces (non-git folders) are valid too, so do not assume git exists.
 
+## 0. Think like an agent that has Orca
+
+Knowing what Orca makes possible matters as much as knowing the commands. You are not one agent
+with one checkout. You can try an alternative in an isolated worktree without risking your
+branch, get a second opinion from a different model, split work across agents, prove a UI change
+in a real browser, check whether another agent already owns a ticket, search what past sessions
+learned, and keep the human informed through your card without interrupting them. Notice the
+moments that call for these:
+
+- **Unsure of the approach, a flaky bug, or a failed attempt already:** race agents or spike in a
+  throwaway worktree.
+- **Splittable work:** hand off the parts. Supervise if you'll merge or check the results.
+- **A change you're not sure of:** a different agent reviews your branch, read-only.
+- **Out-of-scope discovery:** hand it off. Don't widen your diff.
+- **About to claim the UI works:** verify in the browser first.
+- **New error or ticket:** run `search` and `reference find` before you start.
+- **Need a human decision:** comment plus `--unread`, not just chat text.
+
+The counterweight: extra agents spend the user's subscription and review time. Just do the cheap,
+reversible moves (checkpoints, read-only queries, verifying your own work). For anything that
+launches agents, automates or publishes, propose it in one line with its cost and wait for a yes,
+unless the user already gave standing permission. Load `references/operating-model.md` when
+planning any non-trivial task inside Orca. It covers triggers, anti-patterns and autonomy
+calibration.
+
+## How this skill relates to Orca's built-in skills
+
+Orca ships its own skills (`orca-cli`, `orchestration`, `computer-use`, `orca-linear`, …). They
+are thin stubs that load a guide printed by the installed binary, so their command rules always
+match the version the user has. This skill is designed to layer on top of them, not replace them:
+
+- **Command rules and flags:** theirs is authoritative. If `orca skills get orca-cli` or
+  `orchestration` was already loaded this session, don't re-derive those rules from this skill's
+  copies. Where they disagree, the live guide wins.
+- **This skill adds** the operating model above, the API contract (`references/api-contract.md`),
+  end-to-end workflows, the offline references for when no CLI or network is available, the
+  plugin's slash commands, the fleet-reporter subagent, and the mock CLI for testing scripts.
+- If both trigger on the same request, use this skill to decide *what* to do and theirs for
+  *exactly how*.
+
 ## 1. Orient before acting
 
 Do this once at the start of any Orca-related task. It takes a few seconds and prevents the most
@@ -242,6 +282,7 @@ Each of these is a real failure mode, not ceremony:
 
 | File | Read when |
 | --- | --- |
+| `references/operating-model.md` | Planning work inside Orca: when to race, hand off, review, verify, automate, and when not to |
 | `references/api-contract.md` | Writing scripts or tools against Orca, parsing receipts, handling errors, retries, multi-host. Dry-run them with `scripts/mock_orca.py` |
 | `references/workflows.md` | Running any §4 workflow end to end |
 | `references/orchestration.md` | Coordinating or acting as a supervised worker without the live guide |
