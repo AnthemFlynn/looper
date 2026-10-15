@@ -1,0 +1,27 @@
+{
+  "skill_name": "orca",
+  "evals": [
+    {
+      "id": 1,
+      "name": "handoff-with-checkpoint",
+      "prompt": "I'm in my Orca worktree for the auth 401 bug. I've already found it: in src/auth/refresh.ts the refresh token gets reused after a 401 instead of being rotated. Hand the actual fix off to codex in a fresh worktree, and update my workspace card so I remember what I did. Orca is installed on this Linux box.",
+      "expected_output": "Uses orca-ide (not bare orca) with --json; reads worktree current before writing; creates an independent worktree with --no-parent --agent codex and a self-contained --prompt; reports the new worktree id + agent handle; does not supervise/wait/resend; updates the card comment preserving the user's note.",
+      "files": [],
+      "env": "PATH=<mockbin>:$PATH, ORCA_MOCK_LOG, ORCA_WORKTREE_ID, ORCA_TERMINAL_HANDLE (mock CLI)"
+    },
+    {
+      "id": 2,
+      "name": "race-script",
+      "prompt": "Write me a bash script race.sh I can run from any terminal on my Mac. It takes a task description as its argument and races claude, codex and opencode on it, each in its own Orca worktree off main, for my repo (Orca repo id repo-9c1). It should wait for all of them to finish (give each at most 30 minutes) and then print a table comparing each agent's branch, number of commits and diffstat. Don't delete anything.",
+      "expected_output": "A robust race.sh that drives the orca CLI with --json, checks ok, uses explicit selectors, --no-parent, captures launch handles, bounded tui-idle waits, no blind resends, git-based comparison, no removal.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "repo-setup-config",
+      "prompt": "Our repo is a pnpm monorepo. Every new Orca worktree needs pnpm install, plus the gitignored .env and apps/web/.env.local files. I want an agent tab and a dev server tab that runs `pnpm --filter web dev`. Agents shouldn't start until the install finishes. The turbo cache in .turbo (gitignored) should be shared between worktrees, not copied. Write whatever config files Orca needs, and tell me anything I need to know to make it work.",
+      "expected_output": "orca.yaml with scripts.setup, setupAgentStartupPolicy: wait-for-setup, defaultTabs (first tab no command, dev tab), worktree.sharedDirectories [.turbo]; .worktreeinclude with literal .env and apps/web/.env.local; caveats: primary checkout, duplicate keys, tab commands don't wait for setup.",
+      "files": []
+    }
+  ]
+}

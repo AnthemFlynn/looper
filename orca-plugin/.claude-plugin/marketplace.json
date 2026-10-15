@@ -1,0 +1,19 @@
+{
+  "name": "orca-tools",
+  "owner": {
+    "name": "AnthemFlynn"
+  },
+  "metadata": {
+    "description": "Claude Code plugins for working with Orca, the multi-agent coding IDE (onorca.dev)."
+  },
+  "plugins": [
+    {
+      "name": "orca",
+      "source": "./plugins/orca",
+      "description": "Drive Orca from Claude Code: worktrees, parallel agents, handoffs, checkpoints, orchestration, built-in browser, automations, and a complete agent-facing CLI/API reference.",
+      "version": "0.1.0",
+      "category": "productivity",
+      "keywords": ["orca", "worktrees", "multi-agent", "orchestration", "cli"]
+    }
+  ]
+}

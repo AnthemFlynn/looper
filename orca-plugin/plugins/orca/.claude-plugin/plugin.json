@@ -1,0 +1,11 @@
+{
+  "name": "orca",
+  "version": "0.1.0",
+  "description": "Drive Orca (onorca.dev) from Claude Code: worktrees, parallel agents, handoffs, checkpoints, orchestration, built-in browser, automations, and a complete agent-facing CLI/API reference.",
+  "author": {
+    "name": "AnthemFlynn"
+  },
+  "homepage": "https://www.onorca.dev/docs",
+  "license": "MIT",
+  "keywords": ["orca", "worktrees", "multi-agent", "orchestration", "agents", "cli"]
+}
