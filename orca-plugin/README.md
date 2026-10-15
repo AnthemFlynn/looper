@@ -16,6 +16,7 @@ orca-plugin/
     │   ├── SKILL.md                       # the hub: orient, API contract, mechanism picker, workflows, safety
     │   ├── scripts/orca.sh                # resolves the right CLI (orca / orca-ide / orca-dev / shim) and runs it
     │   ├── scripts/build_reference.py     # regenerates references/commands from `orca agent-context --json`
+    │   ├── scripts/mock_orca.py           # fake CLI for dry-running Orca scripts without Orca installed
     │   └── references/
     │       ├── api-contract.md            # envelope, discovery, identity, receipts, errors, retries, hosts, paging
     │       ├── workflows.md               # 16 step-by-step recipes
@@ -59,6 +60,15 @@ commands, and it defers to `orca skills get` whenever the CLI is present.
 | `/orca:handoff <task> [--agent codex]` | Full ownership transfer to a fresh agent in a new worktree |
 | `/orca:supervise <objective>` | Supervised orchestration run (Experimental feature in Orca) |
 | `/orca:refresh-reference` | Regenerates the command reference from your installed Orca |
+
+## Evals
+
+`evals/evals.json` holds three realistic prompts (hand off a task, write a race script, set up
+`orca.yaml`) with assertions. `evals/grade.py` grades them programmatically. Eval 1 runs against
+`mock_orca.py` (symlinked as `orca-ide`) and checks the exact CLI calls the agent made.
+`evals/iteration-1-review.html` is the side-by-side review of iteration 1: the skill passed
+100% of assertions, the no-skill baseline 87%. The baseline missed the independent-worktree
+handoff, used an invalid selector form, and didn't check the JSON envelope.
 
 ## Keeping it current
 

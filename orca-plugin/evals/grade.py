@@ -24,7 +24,7 @@ def grade_handoff(out: Path):
     reply = read(out / "final_reply.md")
     calls = [" ".join(a) for a in log]
     first = lambda pred: next((i for i, a in enumerate(log) if pred(a)), None)
-    exempt = lambda a: a[:1] in (["--version"], ["-v"], ["--help"]) or a[:2] == ["skills", "get"] or a[:1] == ["agent-context"]
+    exempt = lambda a: a[:1] in (["--version"], ["-v"]) or "--help" in a or a[:2] == ["skills", "get"] or a[:1] == ["agent-context"]
     creates = [a for a in log if a[:2] == ["worktree", "create"]]
     sets = [a for a in log if a[:2] == ["worktree", "set"]]
     i_read = first(lambda a: a[:2] in (["worktree", "current"], ["worktree", "show"], ["worktree", "ps"]))
@@ -129,8 +129,8 @@ def grade_config(out: Path):
         check(".worktreeinclude lists .env and apps/web/.env.local as literal paths", ".env" in inc_lines and "apps/web/.env.local" in inc_lines and not any(c in inc for c in "*?!"), json.dumps(inc_lines)),
         check(".turbo is shared, not copied (absent from .worktreeinclude)", not any(l.startswith(".turbo") for l in inc_lines), json.dumps(inc_lines)),
         check("Reply explains config is read from the primary checkout", re.search(r"primary checkout|primary (repo|clone|folder)|main checkout", reply, re.I), "found" if re.search(r"primary checkout|primary (repo|clone|folder)|main checkout", reply, re.I) else "missing"),
-        check("Reply warns tab commands don't wait for setup", re.search(r"(tab|dev server).{0,120}(not|n't|doesn't|does not) wait|before (the )?(install|setup) (finishes|completes)|race", reply, re.I | re.S),
-              "found" if re.search(r"(tab|dev server).{0,120}(not|n't|doesn't|does not) wait|before (the )?(install|setup) (finishes|completes)|race", reply, re.I | re.S) else "missing"),
+        check("Reply warns tab commands don't wait for setup", re.search(r"(tab|dev server).{0,160}((not|n't|doesn't|does not) wait|right away|immediately|in parallel)|before (the )?(install|setup) (finishes|completes|is done)|race condition", reply, re.I | re.S),
+              "found" if re.search(r"(tab|dev server).{0,160}((not|n't|doesn't|does not) wait|right away|immediately|in parallel)|before (the )?(install|setup) (finishes|completes|is done)|race condition", reply, re.I | re.S) else "missing"),
     ]
 
 

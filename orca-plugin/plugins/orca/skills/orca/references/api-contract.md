@@ -256,6 +256,11 @@ workflow. When you relay it to the user, say where it came from.
 - Make writes idempotent by reading first (`worktree current` before `--comment`; `reference list`
   before `add`, though duplicate adds are no-ops anyway).
 - Bound every wait (`--timeout-ms`) and treat a timeout as a checkpoint, not a failure.
+- Dry-run before handing a script over. `scripts/mock_orca.py` is a fake CLI: symlink it as
+  `orca` or `orca-ide` onto PATH. It logs every argv to `$ORCA_MOCK_LOG` and answers with real
+  envelope and receipt shapes, including a `selector_not_found` refusal for invalid selectors.
+  That catches flow bugs (wrong command, missing `--json`, resend loops) without Orca installed.
+  Its data is canned, so still confirm field paths against one real call.
 - Tools for other agents: wrap a short, typed set of Orca commands (status, ps, read, send, wait,
   checkpoint) rather than exposing raw argv. Return the receipts' proof fields (`accepted`,
   `stages`, `prompt.outcome`, `liveness`) so the caller can reason about certainty.

@@ -9,9 +9,9 @@ description: >-
   to an Orca terminal, worktree comments and checkpoints, Orca orchestration (runs, tasks,
   dispatches, workers, gates), Orca's built-in browser, Orca automations, Orca artifacts, orca.yaml or
   .worktreeinclude, orca serve, remote Orca servers or SSH targets, or `ORCA_*` environment
-  variables. Also use it when the session is running inside an Orca terminal (ORCA_WORKTREE_ID or
-  ORCA_TERMINAL_HANDLE is set), even if Orca is never named, so that progress gets reported back
-  into Orca. Do not use it for the GNOME Orca screen reader or for unrelated projects named "orca".
+  variables. Also use it inside an Orca terminal (ORCA_WORKTREE_ID or ORCA_TERMINAL_HANDLE is set),
+  even if Orca is never named, so progress gets reported back into Orca. Not for the GNOME Orca
+  screen reader or unrelated projects named "orca".
 ---
 
 # Orca
@@ -242,7 +242,7 @@ Each of these is a real failure mode, not ceremony:
 
 | File | Read when |
 | --- | --- |
-| `references/api-contract.md` | Writing scripts or tools against Orca, parsing receipts, handling errors, retries, multi-host |
+| `references/api-contract.md` | Writing scripts or tools against Orca, parsing receipts, handling errors, retries, multi-host. Dry-run them with `scripts/mock_orca.py` |
 | `references/workflows.md` | Running any §4 workflow end to end |
 | `references/orchestration.md` | Coordinating or acting as a supervised worker without the live guide |
 | `references/config-and-settings.md` | orca.yaml, .worktreeinclude, setup hooks, agent settings, permission modes |
